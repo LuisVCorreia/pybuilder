@@ -1,7 +1,7 @@
 import os
 import tempfile
 import pytest
-from backtest_fetch.fetch_block import fetch_and_store_block
+from backtest.fetch.fetch_block import fetch_and_store_block
 
 def test_fetch_and_store_block():
     provider_url = os.environ.get("TEST_ETH_PROVIDER")

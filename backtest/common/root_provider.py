@@ -1,5 +1,5 @@
 from web3 import Web3, HTTPProvider
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 class RootProvider:
     """

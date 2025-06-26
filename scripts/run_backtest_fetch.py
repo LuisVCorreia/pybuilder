@@ -3,8 +3,8 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import argparse
-from backtest_fetch.config import load_config
-from backtest_fetch.fetch_block import fetch_and_store_block
+from backtest.config import load_config
+from backtest.fetch.fetch_block import fetch_and_store_block
 from dotenv import load_dotenv
 load_dotenv()
 
