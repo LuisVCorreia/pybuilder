@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta, timezone
+from typing import List
 from .root_provider import RootProvider
 from .mempool_fetcher import ensure_parquet_files
-from .order import filter_transactions
+from .order import filter_orders_by_base_fee, fetch_transactions, Order
 from .store import init_db, write_block_data
 from .mev_boost import fetch_winning_bid_trace
 
@@ -24,7 +25,7 @@ def fetch_and_store_block(
         sqlite_db_path: Path to SQLite DB
     """
 
-    # 1. Fetch block from provider
+    # Fetch block from provider
     provider = RootProvider(provider_url)
     block = provider.get_block(block_number, full_transactions=True)
     block_ts = block['timestamp']  # In seconds
@@ -37,7 +38,15 @@ def fetch_and_store_block(
     to_dt   = block_dt + timedelta(seconds=window_after_sec)
 
     parquet_files = ensure_parquet_files(mempool_data_dir, from_dt, to_dt)
-    mempool_txs = filter_transactions(parquet_files, from_ts_ms, to_ts_ms)
+    mempool_txs = fetch_transactions(parquet_files, from_ts_ms, to_ts_ms)
+
+    print("Fetched orders, unfiltered: ", len(mempool_txs))
+
+    base_fee = block["baseFeePerGas"]
+    mempool_txs = filter_orders_by_base_fee(base_fee, mempool_txs)
+
+    print("Filtered orders by base fee: ", len(mempool_txs))
+
     block_hash = block["hash"].hex() if hasattr(block["hash"], "hex") else str(block["hash"])
     
     try:

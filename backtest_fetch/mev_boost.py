@@ -32,7 +32,6 @@ def get_one_delivered_payload(relay_url: str, block_number: int, timeout: float 
         resp.raise_for_status()
     except requests.exceptions.RequestException as e:
         # This will catch ConnectionError (DNS), timeouts, HTTP errors, etc
-        print(f"⚠️  Relay {relay_url} failed: {e}")
         return None
     
     body = resp.json()
@@ -77,7 +76,6 @@ def fetch_winning_bid_trace(block_hash: str, block_number: int) -> Dict:
             resp = requests.get(url, params={"block_hash": ph}, timeout=5.0)
             resp.raise_for_status()
         except requests.exceptions.RequestException as e:
-            print(f"⚠️  BuilderBlockReceived failed on {relay}: {e}")
             continue
 
         body = resp.json()
