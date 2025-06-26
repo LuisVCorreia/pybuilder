@@ -1,7 +1,9 @@
 import sqlite3
-from typing import Optional, Dict
-import pandas as pd
-
+from typing import Optional, Dict, List
+from .order import Order
+import json
+import zlib
+import struct
 
 def init_db(db_path: str) -> sqlite3.Connection:
     """
@@ -74,11 +76,31 @@ def insert_order(
     conn.commit()
 
 
+def compress_prepend_size(input_bytes: bytes) -> bytes:
+    """
+    Compress all bytes of `input_bytes`, prefixing the uncompressed length as a little-endian u32.
+    Equivalent to Rust's compress_prepend_size.
+    """
+    compressed = zlib.compress(input_bytes)
+    return struct.pack('<I', len(input_bytes)) + compressed
+
+
+def decompress_size_prepended(data: bytes) -> bytes:
+    """
+    Given bytes prefixed by a little-endian u32 length, decompress the rest.
+    Equivalent to Rust's decompress_size_prepended.
+    """
+    size, = struct.unpack('<I', data[:4])
+    decompressed = zlib.decompress(data[4:])
+    if len(decompressed) != size:
+        raise ValueError(f"Decompressed size {len(decompressed)} does not match prefix {size}")
+    return decompressed
+
 def write_block_data(
     conn: sqlite3.Connection,
     block_number: int,
     bid_trace: Dict,
-    orders: pd.DataFrame
+    orders: List[Order]
 ):
     """
     Write a block and its orders to the database.
@@ -89,15 +111,24 @@ def write_block_data(
     # 1) Insert or replace block (also clears old orders)
     insert_block(conn, bid_trace)
 
-    # 2) Insert each order row
-    for _, row in orders.iterrows():
-        # Expect DataFrame columns: timestamp_ms, raw_tx/order_data, order_type, order_id
-        data = row.to_dict()
+    # 2) Insert each order
+    for order in orders:
+        oid = str(order.id())
+        otype = order.order_type().value
+        odata = order.order_data()
+        serialized_data = json.dumps(
+            odata,
+            default=lambda o: o.hex() if isinstance(o, (bytes, bytearray)) else str(o)
+        ).encode('utf-8')
+
+        # Compress the JSON payload
+        compressed_data = compress_prepend_size(serialized_data)
+
         insert_order(
             conn,
             block_number,
-            int(data.get('timestamp_ms', 0)),
-            data.get('order_type', 'tx'),
-            data.get('order_id'),
-            data.get('order_data', data.get('raw_tx'))
+            int(odata.get('timestamp_ms', 0)),
+            otype,
+            oid,
+            compressed_data
         )

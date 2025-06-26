@@ -31,7 +31,7 @@ def get_one_delivered_payload(relay_url: str, block_number: int, timeout: float 
         resp = requests.get(url, params=params, timeout=timeout)
         resp.raise_for_status()
     except requests.exceptions.RequestException as e:
-        # this will catch ConnectionError (DNS), timeouts, HTTP errors, etc.
+        # This will catch ConnectionError (DNS), timeouts, HTTP errors, etc
         print(f"⚠️  Relay {relay_url} failed: {e}")
         return None
     
@@ -101,6 +101,5 @@ def fetch_winning_bid_trace(block_hash: str, block_number: int) -> Dict:
     if not candidates:
         raise RuntimeError(f"No winning bid trace for block {block_number}")
 
-    # earliest timestamp wins
+    # Earliest timestamp wins
     return min(candidates, key=lambda b: b["timestamp_ms"])
-
