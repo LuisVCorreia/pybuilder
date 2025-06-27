@@ -4,10 +4,13 @@ from ..common.mempool import ensure_parquet_files
 from ..common.order import filter_orders_by_base_fee, fetch_transactions
 from ..common.store import init_db, write_block_data
 from ..common.mev_boost import fetch_winning_bid_trace
+import logging
 
 sec_to_ms = lambda s: int(s * 1000)
 window_before_sec = 180 # 3 mins
 window_after_sec = 5
+
+logger = logging.getLogger(__name__)
 
 def fetch_and_store_block(
     block_number: int,
@@ -39,23 +42,23 @@ def fetch_and_store_block(
     parquet_files = ensure_parquet_files(mempool_data_dir, from_dt, to_dt)
     mempool_txs = fetch_transactions(parquet_files, from_ts_ms, to_ts_ms)
 
-    print("Fetched orders, unfiltered: ", len(mempool_txs))
+    logger.info("Fetched orders, unfiltered: %d", len(mempool_txs))
 
     base_fee = block["baseFeePerGas"]
     mempool_txs = filter_orders_by_base_fee(base_fee, mempool_txs)
 
-    print("Filtered orders by base fee: ", len(mempool_txs))
+    logger.info("Filtered orders by base fee: %d", len(mempool_txs))
 
     block_hash = block["hash"].hex() if hasattr(block["hash"], "hex") else str(block["hash"])
     
     try:
         bid_trace = fetch_winning_bid_trace(block_hash, block_number)
     except RuntimeError as e:
-        print(f"⚠️  Skipping block {block_number}: {e}")
+        logger.warning(f"Skipping block {block_number}: {e}")
         return  # nothing more to do for this block
 
     # Store block and orders in SQLite
     conn = init_db(sqlite_db_path)
     write_block_data(conn, block_number, bid_trace, mempool_txs)
     conn.close()
-    print(f"Block {block_number} and {len(mempool_txs)} mempool txs stored in {sqlite_db_path}")
+    logger.info(f"Block {block_number} and {len(mempool_txs)} mempool txs stored in {sqlite_db_path}")

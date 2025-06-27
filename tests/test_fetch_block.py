@@ -16,8 +16,6 @@ def test_fetch_and_store_block():
             provider_url=provider_url,
             mempool_data_dir=mempool_data_dir,
             sqlite_db_path=db_path,
-            window_before_sec=60,
-            window_after_sec=5,
         )
         assert os.path.exists(db_path)
     finally:

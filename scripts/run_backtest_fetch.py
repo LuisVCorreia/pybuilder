@@ -6,6 +6,7 @@ import argparse
 from backtest.config import load_config
 from backtest.fetch.fetch_block import fetch_and_store_block
 from dotenv import load_dotenv
+import logging
 load_dotenv()
 
 
@@ -19,6 +20,10 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+    # Set up logging from config
+    log_level = getattr(logging, config.get("logging_level", "INFO").upper(), logging.INFO)
+    logging.basicConfig(level=log_level, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+
     block_number = args.block if args.block is not None else config.get("block_number")
     provider_url = args.provider if args.provider else config["provider_url"]
     mempool_data_dir = args.mempool_dir if args.mempool_dir else config["mempool_data_dir"]
