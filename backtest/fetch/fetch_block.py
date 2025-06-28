@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
-from ..common.root_provider import RootProvider
+from .root_provider import RootProvider
 from ..common.mempool import ensure_parquet_files
-from ..common.order import filter_orders_by_base_fee, fetch_transactions
+from ..common.order import filter_orders_by_base_fee, filter_orders_by_nonces, fetch_transactions
 from ..common.store import init_db, write_block_data
 from ..common.mev_boost import fetch_winning_bid_trace
 import logging
@@ -41,13 +41,16 @@ def fetch_and_store_block(
 
     parquet_files = ensure_parquet_files(mempool_data_dir, from_dt, to_dt)
     mempool_txs = fetch_transactions(parquet_files, from_ts_ms, to_ts_ms)
-
-    logger.info("Fetched orders, unfiltered: %d", len(mempool_txs))
+    logger.info("Fetched orders, unfiltered. Orders left: %d", len(mempool_txs))
 
     base_fee = block["baseFeePerGas"]
     mempool_txs = filter_orders_by_base_fee(base_fee, mempool_txs)
+    logger.info("Filtered orders by base fee. Orders left: %d", len(mempool_txs))
 
-    logger.info("Filtered orders by base fee: %d", len(mempool_txs))
+    mempool_txs = filter_orders_by_nonces(provider, mempool_txs, block_number)
+    logger.info("Filtered orders by nonces. Orders left: %d", len(mempool_txs))    
+
+    mempool_txs.sort(key=lambda o: o.timestamp_ms)
 
     block_hash = block["hash"].hex() if hasattr(block["hash"], "hex") else str(block["hash"])
     
