@@ -60,7 +60,7 @@ def get_delivered_payloads(block_number: int) -> List[Tuple[str, Dict]]:
     return out
 
 
-def fetch_winning_bid_trace(block_hash: str, block_number: int) -> Dict:
+def fetch_winning_bid_trace(block_number: int) -> Dict:
     delivered = get_delivered_payloads(block_number)
     if not delivered:
         raise RuntimeError(f"No payload delivered for block {block_number}")

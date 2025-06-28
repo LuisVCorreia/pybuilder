@@ -1,10 +1,12 @@
 import sys
 import os
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import argparse
 from backtest.config import load_config
-from backtest.fetch.fetch_block import fetch_and_store_block
+from backtest.fetch.fetch_block import fetch_historical_data
+from backtest.common.store import HistoricalDataStorage
 from dotenv import load_dotenv
 import logging
 load_dotenv()
@@ -23,6 +25,7 @@ def main():
     # Set up logging from config
     log_level = getattr(logging, config.get("logging_level", "INFO").upper(), logging.INFO)
     logging.basicConfig(level=log_level, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+    logger = logging.getLogger(__name__)
 
     block_number = args.block if args.block is not None else config.get("block_number")
     provider_url = args.provider if args.provider else config["provider_url"]
@@ -32,12 +35,19 @@ def main():
     if block_number is None:
         raise ValueError("Block number must be specified via --block or in config.yaml")
 
-    fetch_and_store_block(
+    block_data = fetch_historical_data(
         block_number=block_number,
         provider_url=provider_url,
         mempool_data_dir=mempool_data_dir,
-        sqlite_db_path=sqlite_db_path,
     )
+
+    # Store block data using HistoricalDataStorage
+    storage = HistoricalDataStorage(sqlite_db_path)
+    storage.write_block_data(block_data)
+    storage.close()
+
+    logger.info(f"Block {block_number} and {len(block_data.available_orders)} mempool txs stored in {sqlite_db_path}")
+
 
 if __name__ == "__main__":
     main()
