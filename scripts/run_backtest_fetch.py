@@ -28,9 +28,9 @@ def main():
     logger = logging.getLogger(__name__)
 
     block_number = args.block if args.block is not None else config.get("block_number")
-    provider_url = args.provider if args.provider else config["provider_url"]
-    mempool_data_dir = args.mempool_dir if args.mempool_dir else config["mempool_data_dir"]
-    sqlite_db_path = args.db if args.db else config["sqlite_db_path"]
+    provider_url = args.provider if args.provider else config["fetch_rpc_url"]
+    mempool_data_dir = args.mempool_dir if args.mempool_dir else config["fetch_mempool_data_dir"]
+    sqlite_db_path = args.db if args.db else config["fetch_sqlite_db_path"]
 
     if block_number is None:
         raise ValueError("Block number must be specified via --block or in config.yaml")
@@ -39,14 +39,15 @@ def main():
         block_number=block_number,
         provider_url=provider_url,
         mempool_data_dir=mempool_data_dir,
+        concurrency_limit=config.get("fetch_concurrency_limit")
     )
 
-    # Store block data using HistoricalDataStorage
-    storage = HistoricalDataStorage(sqlite_db_path)
-    storage.write_block_data(block_data)
-    storage.close()
-
-    logger.info(f"Block {block_number} and {len(block_data.available_orders)} mempool txs stored in {sqlite_db_path}")
+    if block_data:
+        # Store block data using HistoricalDataStorage
+        storage = HistoricalDataStorage(sqlite_db_path)
+        storage.write_block_data(block_data)
+        storage.close()
+        logger.info(f"Block {block_number} and {len(block_data.available_orders)} mempool txs stored in {sqlite_db_path}")
 
 
 if __name__ == "__main__":

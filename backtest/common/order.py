@@ -9,6 +9,8 @@ import pandas as pd
 import logging
 from ..fetch.root_provider import RootProvider
 from eth_account import Account
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 
@@ -379,7 +381,8 @@ def filter_orders_by_base_fee(
 def filter_orders_by_nonces(
     provider: RootProvider,
     orders: List[Order],
-    block_number: int
+    block_number: int,
+    concurrency_limit: int,
 ) -> List[Order]:
     """
     Filters out orders whose non-optional sub-txns have already been mined.
@@ -391,37 +394,55 @@ def filter_orders_by_nonces(
     Returns the filtered list.
     """
     parent_block = block_number - 1
-    nonce_cache: Dict[str, int] = {}
-    kept: List[Order] = []
+    
+    # Collect all unique addresses to fetch nonces for
+    unique_addresses = set()
+    for order in orders:
+        for nonce in order.nonces():
+            unique_addresses.add(nonce.address)
 
+    # Fetch nonces concurrently
+    nonce_cache: Dict[str, int] = {}
+    lock = Lock()
+
+    def fetch_and_cache_nonce(address: str):
+        try:
+            nonce = provider.w3.eth.get_transaction_count(address, parent_block)
+            with lock:
+                nonce_cache[address] = nonce
+        except Exception as e:
+            logger.debug(f"Could not fetch nonce for {address}@{parent_block}: {e}")
+            # If fetching fails, we can't validate, so we store -1 to indicate failure
+            with lock:
+                nonce_cache[address] = -1
+
+    with ThreadPoolExecutor(max_workers=concurrency_limit) as executor:
+        executor.map(fetch_and_cache_nonce, unique_addresses)
+
+    # Filter orders using cache
+    kept: List[Order] = []
     for order in orders:
         order_nonces = order.nonces()
         all_nonces_failed = True
         should_drop = False
 
         for nonce in order_nonces:
-            # Check cache first
             onchain_nonce = nonce_cache.get(nonce.address)
-            
-            if onchain_nonce is None:
-                try:
-                    onchain_nonce = provider.w3.eth.get_transaction_count(nonce.address, parent_block)
-                    nonce_cache[nonce.address] = onchain_nonce
-                except Exception as e:
-                    logger.debug(f"Could not fetch nonce for {nonce.address}@{parent_block}: {e}")
-                    # If we can't get the nonce, be conservative and drop the order
-                    should_drop = True
-                    break
 
-            # Check if this nonce is too low (already mined)
+            if onchain_nonce is None or onchain_nonce == -1:
+                should_drop = True
+                break
+
+            # Check if this nonce is too low
             if onchain_nonce > nonce.nonce and not nonce.optional:
                 logger.debug(
                     f"Order nonce too low, order: {order.id()}, nonce: {nonce.nonce}, onchain tx count: {onchain_nonce}"
                 )
                 should_drop = True
                 break
-            elif onchain_nonce <= nonce.nonce:
-                # This nonce is still valid
+            
+            if onchain_nonce <= nonce.nonce:
+                # This nonce is still valid, so not all nonces have failed
                 all_nonces_failed = False
 
         if should_drop:

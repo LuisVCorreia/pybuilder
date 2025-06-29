@@ -16,6 +16,7 @@ def fetch_historical_data(
     block_number: int,
     provider_url: str,
     mempool_data_dir: str,
+    concurrency_limit: int
 ):
     """
     Fetch a block and its mempool txs, and store in SQLite DB.
@@ -58,7 +59,7 @@ def fetch_historical_data(
     mempool_txs = filter_orders_by_base_fee(base_fee, mempool_txs)
     logger.info("Filtered orders by base fee. Orders left: %d", len(mempool_txs))
 
-    mempool_txs = filter_orders_by_nonces(provider, mempool_txs, block_number)
+    mempool_txs = filter_orders_by_nonces(provider, mempool_txs, block_number, concurrency_limit)
     logger.info("Filtered orders by nonces. Orders left: %d", len(mempool_txs))
 
     mempool_txs.sort(key=lambda o: o.timestamp_ms)
