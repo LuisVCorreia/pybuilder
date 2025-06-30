@@ -14,4 +14,9 @@ The workflow consists of two steps:
    This downloads the relevant mempool data using Flashbots' [Mempool Dumpster](https://mempool-dumpster.flashbots.net/index.html) and stores everything in a SQLite database configured in `config.yaml`.
 
 2. **Build the block.**
-   Building logic is not implemented yet. Future versions will replay orders from the database to construct blocks for analysis.
+   Run the backtest build script to simulate block building from the fetched data:
+   ```bash
+   python scripts/run_backtest_build.py 20114954
+   ```
+   This reads the block data and available orders from the SQLite database and simulates the block building process for analysis.
+   
