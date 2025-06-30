@@ -11,6 +11,7 @@ from ..fetch.root_provider import RootProvider
 from eth_account import Account
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,52 @@ class Order:
     def nonces(self) -> List[TxNonce]:
         """Return list of nonces this order depends on."""
         raise NotImplementedError
+
+    @classmethod
+    def from_serialized(cls, order_type_str: str, serialized_data: bytes) -> 'Order':
+        """
+        Factory method to deserialize an order from its database representation.
+        """
+        order_data = json.loads(serialized_data.decode('utf-8'))
+        order_type = OrderType(order_type_str)
+
+        if order_type == OrderType.TX:
+            raw_tx_hex = order_data['raw_tx']
+            if raw_tx_hex.startswith('0x'):
+                raw_tx_hex = raw_tx_hex[2:]
+            raw_tx = bytes.fromhex(raw_tx_hex)
+            
+            # We can re-derive the full TxOrder by using the from_raw constructor
+            return TxOrder.from_raw(order_data['timestamp_ms'], raw_tx)
+        
+        elif order_type == OrderType.BUNDLE:
+            # Reconstruct inner orders
+            inner_orders = [
+                cls.from_serialized(o['order_type'], json.dumps(o['data']).encode('utf-8')) 
+                for o in order_data['orders']
+            ]
+            return BundleOrder(
+                order_data['timestamp_ms'],
+                order_data['bundle_id'],
+                inner_orders
+            )
+
+        elif order_type == OrderType.SHAREBUNDLE:
+            # Reconstruct inner orders
+            inner_orders = [
+                cls.from_serialized(o['order_type'], json.dumps(o['data']).encode('utf-8'))
+                for o in order_data['orders']
+            ]
+            return ShareBundleOrder(
+                order_data['timestamp_ms'],
+                order_data['bundle_id'],
+                inner_orders,
+                order_data['can_revert'],
+                order_data['gas_used']
+            )
+
+        raise ValueError(f"Unknown order type for deserialization: {order_type}")
+
 
 class TxOrder(Order):
     def __init__(self, timestamp_ms: int, raw_tx: bytes, max_fee_per_gas: int, nonce: int, sender: str, canonical_tx: bytes = None):

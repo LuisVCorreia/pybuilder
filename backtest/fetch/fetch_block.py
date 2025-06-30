@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from .root_provider import RootProvider
-from ..common.mempool import ensure_parquet_files
+from .mempool import ensure_parquet_files
 from ..common.order import filter_orders_by_base_fee, fetch_transactions, filter_orders_by_nonces
-from ..common.mev_boost import fetch_winning_bid_trace
+from .mev_boost import fetch_winning_bid_trace
 from ..common.block_data import BlockData, OrdersWithTimestamp
 import logging
 
@@ -30,9 +30,12 @@ def fetch_historical_data(
 
     # Fetch block from provider
     provider = RootProvider(provider_url)
-    block = provider.get_block(block_number, full_transactions=True)
+    onchain_block = provider.get_block(block_number, full_transactions=True)
 
-    block_hash = block["hash"].hex() if hasattr(block["hash"], "hex") else str(block["hash"])
+    # Convert hash from HexBytes to hex string (web3.py returns HexBytes)
+    onchain_block["hash"] = "0x" + onchain_block["hash"].hex()
+    assert onchain_block["hash"].startswith("0x"), f"Expected hash to start with 0x, got: {onchain_block['hash']}"
+    
     logger.info("Fetching payload delivered")
     try:
         bid_trace = fetch_winning_bid_trace(block_number)
@@ -40,7 +43,7 @@ def fetch_historical_data(
         logger.warning(f"Skipping block {block_number}: {e}")
         return  # Nothing more to do for this block
 
-    block_ts = block['timestamp']  # In seconds
+    block_ts = onchain_block['timestamp']  # In seconds
     block_ts_ms = block_ts * 1_000
     from_ts_ms  = block_ts_ms - (window_before_sec * 1_000)
     to_ts_ms    = block_ts_ms + (window_after_sec  * 1_000)
@@ -55,26 +58,13 @@ def fetch_historical_data(
     mempool_txs = fetch_transactions(parquet_files, from_ts_ms, to_ts_ms)
     logger.info("Fetched orders, unfiltered. Orders left: %d", len(mempool_txs))
 
-    base_fee = block["baseFeePerGas"]
-    mempool_txs = filter_orders_by_base_fee(base_fee, mempool_txs)
+    mempool_txs = filter_orders_by_base_fee(onchain_block["baseFeePerGas"], mempool_txs)
     logger.info("Filtered orders by base fee. Orders left: %d", len(mempool_txs))
 
     mempool_txs = filter_orders_by_nonces(provider, mempool_txs, block_number, concurrency_limit)
     logger.info("Filtered orders by nonces. Orders left: %d", len(mempool_txs))
 
     mempool_txs.sort(key=lambda o: o.timestamp_ms)
-
-    # Convert block dict to proper format for storage
-    onchain_block = {
-        'number': block_number,
-        'hash': block_hash,
-        'timestamp': block_ts,
-        'baseFeePerGas': base_fee,
-        'miner': block.get('miner', ''),
-        'transactions': block.get('transactions', []),
-        # TODO: add more fields as needed
-        **block
-    }
     
     # Convert orders to OrdersWithTimestamp format
     orders_with_timestamp = [

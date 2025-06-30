@@ -3,7 +3,9 @@ import json
 import zlib
 import struct
 import logging
-from .block_data import BlockData
+from decimal import Decimal
+from backtest.common.order import Order
+from .block_data import BlockData, BuiltBlockData, OrdersWithTimestamp
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +141,81 @@ class HistoricalDataStorage:
                 """, (block_data.block_number, order_id))
         
         self.conn.commit()
+
+    def read_block_data(self, block_number: int) -> 'BlockData':
+        """Read block data by block number"""
+        c = self.conn.cursor()
+        
+        # Read block info
+        c.execute("SELECT * FROM blocks WHERE block_number = ?", (block_number,))
+        block_row = c.fetchone()
+        if not block_row:
+            raise ValueError(f"No data found for block {block_number}")
+        
+        block_data = {
+            'block_number': block_row[0],
+            'block_hash': block_row[1],
+            'fee_recipient': block_row[2],
+            'bid_value': Decimal(block_row[3])
+        }
+        
+        # Read orders
+        c.execute("SELECT * FROM orders WHERE block_number = ?", (block_number,))
+        orders = []
+        for row in c.fetchall():
+            order_type = row[2]
+            timestamp_ms = row[1]
+            order_data = decompress_size_prepended(row[4])
+            orders.append(OrdersWithTimestamp(timestamp_ms, Order.from_serialized(order_type, order_data)))
+
+        # Read blocks_data
+        c.execute("SELECT * FROM blocks_data WHERE block_number = ?", (block_number,))
+        blocks_data_row = c.fetchone()
+        if not blocks_data_row:
+            raise ValueError(f"No blocks data found for block {block_number}")
+        
+        winning_bid_trace_json = decompress_size_prepended(blocks_data_row[1])
+        winning_bid_trace = json.loads(winning_bid_trace_json.decode('utf-8'))
+
+        onchain_block_json = decompress_size_prepended(blocks_data_row[2])
+        onchain_block = json.loads(onchain_block_json.decode('utf-8'))
+        
+        # Read built_block_data
+        built_block_data = None
+        c.execute("SELECT * FROM built_block_data WHERE block_number = ?", (block_number,))
+        built_row = c.fetchone()
+        
+        if built_row:
+            orders_closed_at_ts_ms = built_row[1]
+            sealed_at_ts_ms = built_row[2]
+            profit_str = built_row[3]
+            
+            from datetime import datetime
+            orders_closed_at = datetime.fromtimestamp(orders_closed_at_ts_ms / 1000)
+            sealed_at = datetime.fromtimestamp(sealed_at_ts_ms / 1000)
+            
+            built_block_data = BuiltBlockData(
+                included_orders=[],
+                orders_closed_at=orders_closed_at,
+                sealed_at=sealed_at,
+                profit=Decimal(profit_str)
+            )
+            
+            # Read included orders
+            c.execute("SELECT order_id FROM built_block_included_orders WHERE block_number = ?", (block_number,))
+            for inc_order in c.fetchall():
+                built_block_data.included_orders.append(inc_order[0])
+        else:
+            built_block_data = None
+        # Create BlockData instance
+        block_data_instance = BlockData(
+            block_number=block_data['block_number'],
+            winning_bid_trace=winning_bid_trace,
+            onchain_block=onchain_block,
+            available_orders=orders,
+            built_block_data=built_block_data
+        )
+        return block_data_instance
     
     def close(self):
         """Close the database connection"""

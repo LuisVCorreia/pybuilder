@@ -1,5 +1,25 @@
 fetch_rpc_url: "https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}"
-fetch_concurrency_limit: 9
+fetch_concurrency_limit: 8
 fetch_mempool_data_dir: "~/.pybuilder/backtest/mempool_data"
 fetch_sqlite_db_path: "~/.pybuilder/backtest/main.sqlite"
 logging_level: "INFO"
+
+sbundle_mergeable_signers: []
+
+builders:
+  - name: "mp-ordering"
+    algo: "ordering-builder"
+    discard_txs: true
+    sorting: "max-profit"
+    failed_order_retries: 1
+    drop_failed_orders: true
+  - name: "mgp-ordering"
+    algo: "ordering-builder"
+    discard_txs: true
+    sorting: "mev-gas-price"
+    failed_order_retries: 1
+    drop_failed_orders: true
+  - name: "parallel"
+    algo: "parallel-builder"
+    discard_txs: true
+    num_threads: 25
