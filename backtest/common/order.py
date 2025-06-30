@@ -111,6 +111,10 @@ class Order:
         """Return list of nonces this order depends on."""
         raise NotImplementedError
 
+    def transactions(self) -> List[Dict[str, Any]]:
+        """Return list of transactions in this order."""
+        raise NotImplementedError
+
     @classmethod
     def from_serialized(cls, order_type_str: str, serialized_data: bytes) -> 'Order':
         """
@@ -297,6 +301,16 @@ class TxOrder(Order):
         """Return list of nonces this order depends on."""
         return [TxNonce(address=self.sender, nonce=self.nonce, optional=False)]
 
+    def transactions(self) -> List[Dict[str, Any]]:
+        """Return list of transactions in this order (just one for TxOrder)."""
+        tx_hash = keccak(self.canonical_tx)
+        return [{
+            'hash': f"0x{tx_hash.hex()}",
+            'from': self.sender,
+            'nonce': self.nonce,
+            'raw_tx': f"0x{self.raw_tx.hex()}"
+        }]
+
 def _can_execute_list_txs(
     list_txs: List[Tuple['Order', bool]],
     block_base_fee: int
@@ -339,6 +353,13 @@ class BundleOrder(Order):
                 nonces.append(TxNonce(address=nonce.address, nonce=nonce.nonce, optional=optional))
         return nonces
 
+    def transactions(self) -> List[Dict[str, Any]]:
+        """Return list of transactions in this bundle."""
+        transactions = []
+        for order, optional in self.child_orders:
+            transactions.extend(order.transactions())
+        return transactions
+
 @dataclass
 class ShareBundleOrder(Order):
     share_hash: bytes
@@ -363,6 +384,13 @@ class ShareBundleOrder(Order):
             for nonce in order.nonces():
                 nonces.append(TxNonce(address=nonce.address, nonce=nonce.nonce, optional=optional))
         return nonces
+
+    def transactions(self) -> List[Dict[str, Any]]:
+        """Return list of transactions in this sharebundle."""
+        transactions = []
+        for order, optional in self.child_orders:
+            transactions.extend(order.transactions())
+        return transactions
 
 def make_tx_orders(raw_records: List[Dict[str, Any]]) -> List[TxOrder]:
     orders = []

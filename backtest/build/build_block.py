@@ -1,5 +1,6 @@
 import logging
 from backtest.common.store import HistoricalDataStorage
+from backtest.build.simulation.simulator import simulate_orders_with_mock_provider
 
 logger = logging.getLogger(__name__)
 
@@ -41,22 +42,41 @@ class LandedBlockFromDBOrdersSource:
             for missing_nonce_tx in missing_nonce_txs:
                 logger.info(f"Tx: {missing_nonce_tx[0]}, Account: {missing_nonce_tx[1]['account']}, Nonce: {missing_nonce_tx[1]['nonce']}")
 
-def run_backtest_build_block(args, config, order_source):
-    """Simulates and builds a block from a given order source."""
-    orders = order_source.block_data.available_orders
-    logger.info(f"Got {len(orders)} orders to process")
-
-    # Placeholder for simulation logic
-    logger.info("Simulating orders...")
-    # sim_results = simulate_orders(orders, config)
-    # logger.info(f"Simulation complete. Got {len(sim_results)} successful simulations.")
-
-    # Placeholder for builder logic
-    logger.info("Running builders...")
-    # best_bid = run_builders(sim_results, config, args.builders)
-    # logger.info(f"Block building complete. Best bid: {best_bid}")
-
 def run_backtest(args, config):
     logger.info("Starting backtest block build...")
     order_source = LandedBlockFromDBOrdersSource(args, config)
-    run_backtest_build_block(args, config, order_source)
+    
+    orders = order_source.block_data.available_orders
+    logger.info(f"Got {len(orders)} orders to process")
+
+    # Extract just the Order objects for simulation
+    order_objects = [order_with_ts.order for order_with_ts in orders]
+
+    # Simulate orders using mock state provider
+    logger.info("Simulating orders...")
+    simulated_orders = simulate_orders_with_mock_provider(order_objects, args.block)
+    logger.info(f"Simulation complete. Got {len(simulated_orders)} simulated orders.")
+    
+    # Print simulation results
+    successful_sims = [sim for sim in simulated_orders if sim.simulation_result.success]
+    failed_sims = [sim for sim in simulated_orders if not sim.simulation_result.success]
+    
+    logger.info(f"Successful simulations: {len(successful_sims)}")
+    logger.info(f"Failed simulations: {len(failed_sims)}")
+    
+    if successful_sims:
+        total_profit = sum(sim.simulation_result.coinbase_profit for sim in successful_sims)
+        total_gas = sum(sim.simulation_result.gas_used for sim in successful_sims)
+        logger.info(f"Total simulated profit: {total_profit / 10**18:.6f} ETH")
+        logger.info(f"Total simulated gas used: {total_gas:,}")
+    
+    # Show failed simulations for debugging
+    if failed_sims:
+        logger.info("Failed simulations:")
+        for sim in failed_sims[:5]:  # Show first 5 failures
+            logger.info(f"  Order {sim.order.id()}: {sim.simulation_result.error} - {sim.simulation_result.error_message}")
+
+    # Placeholder for builder logic
+    logger.info("Running builders...")
+    # best_bid = run_builders(simulated_orders, config, args.builders)
+    # logger.info(f"Block building complete. Best bid: {best_bid}")
