@@ -1,6 +1,6 @@
 import logging
 from backtest.common.store import HistoricalDataStorage
-from backtest.build.simulation.simulator import simulate_orders_with_mock_provider
+from backtest.build.simulation.evm_utils import simulate_orders_with_alchemy_evm, simulate_orders_with_mock_provider
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +52,8 @@ def run_backtest(args, config):
     # Extract just the Order objects for simulation
     order_objects = [order_with_ts.order for order_with_ts in orders]
 
-    # Simulate orders using mock state provider
     logger.info("Simulating orders...")
-    simulated_orders = simulate_orders_with_mock_provider(order_objects, args.block)
+    simulated_orders = simulate_orders_with_alchemy_evm(order_objects, order_source.block_data, config)
     logger.info(f"Simulation complete. Got {len(simulated_orders)} simulated orders.")
     
     # Print simulation results

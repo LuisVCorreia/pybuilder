@@ -84,8 +84,8 @@ class MockStateProviderFactory(StateProviderFactory):
         # For mock, we ignore the hash and use default block
         return MockStateProvider(self.default_block_number)
     
-    def get_simulation_context(self, block_number: int) -> SimulationContext:
-        """Get simulation context for a block"""
+    def create_simulation_context(self, block_number: int) -> SimulationContext:
+        """Create simulation context for a block"""
         provider = MockStateProvider(block_number)
         return SimulationContext(
             block_number=block_number,
@@ -97,3 +97,8 @@ class MockStateProviderFactory(StateProviderFactory):
             chain_id=self.chain_id,
             coinbase="0x95222290DD7278Aa3Ddd389Cc1E1d165CC4BAfe5"  # Mock builder coinbase
         )
+    
+    # Legacy method for backward compatibility
+    def get_simulation_context(self, block_number: int) -> SimulationContext:
+        """Get simulation context for a block (legacy method)"""
+        return self.create_simulation_context(block_number)

@@ -4,9 +4,12 @@ from dataclasses import dataclass
 from enum import Enum
 
 from backtest.common.order import Order
-from .state_provider import StateProviderFactory
+from backtest.common.block_data import BlockData
+from .state_provider import StateProviderFactory, SimulationContext
 from .mock_provider import MockStateProviderFactory
+from .rpc_provider import AlchemyStateProviderFactory
 from .simulator import SimpleOrderSimulator, SimulatedOrder
+from .evm_simulator import EVMSimulator
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +17,7 @@ logger = logging.getLogger(__name__)
 class StateProviderType(Enum):
     """Types of state providers"""
     MOCK = "mock"
-    # ALCHEMY = "alchemy"
-    # IPC = "ipc"
+    ALCHEMY = "alchemy"
 
 @dataclass
 class SimulationConfig:
@@ -25,8 +27,6 @@ class SimulationConfig:
     state_provider_config: Dict[str, Any]
     
     # Simulation options
-    enable_transaction_decoding: bool = True
-    enable_bundle_simulation: bool = True
     simulation_timeout: int = 30
     cache_state: bool = True
     
@@ -53,41 +53,44 @@ class SimulationOrchestrator:
         provider_type = self.config.state_provider_type
         provider_config = self.config.state_provider_config
         
-        if provider_type == StateProviderType.MOCK:
-            block_number = provider_config.get("block_number", 18000000)
-            return MockStateProviderFactory(block_number)
-        
-        elif provider_type == StateProviderType.ALCHEMY:
-            raise ValueError("Alchemy state provider not available in build simulation")
+        if provider_type == StateProviderType.ALCHEMY:
+            rpc_url = provider_config.get("rpc_url")
+            if not rpc_url:
+                raise ValueError("Alchemy state provider requires 'rpc_url' in config")
+            return AlchemyStateProviderFactory(rpc_url)
         
         else:
             raise ValueError(f"Unsupported state provider type: {provider_type}")
     
-    def simulate_orders(self, orders: List[Order], block_number: int) -> List[SimulatedOrder]:
+    def simulate_orders(self, orders: List[Order], block_data: BlockData) -> List[SimulatedOrder]:
         """
-        Simulate a list of orders using the configured state provider
+        Simulate orders using onchain block data for proper context.
+        This is the preferred method that mirrors rbuilder's approach.
         
         Args:
             orders: List of orders to simulate
-            block_number: Block number for simulation context
+            block_data: Block data containing onchain block and winning bid trace
             
         Returns:
             List of simulated orders with results
         """
         try:
-            # Get simulation context
-            context = self.state_provider_factory.get_simulation_context(block_number)
-            
-            # Create simulator
-            simulator = SimpleOrderSimulator(self.state_provider_factory)
-            
-            # Log simulation start
-            if self.config.log_simulation_details:
-                logger.info(f"Starting simulation of {len(orders)} orders at block {block_number}")
-                logger.info(f"Block context: timestamp={context.block_timestamp}, base_fee={context.block_base_fee}")
-            
-            # Simulate orders
-            results = simulator.simulate_orders(orders, context)
+            context = SimulationContext.from_onchain_block(block_data.onchain_block)
+            parent_block_number = context.block_number - 1
+            parent_state_provider = self.state_provider_factory.history_by_block_number(parent_block_number)
+            logger.info(f"Simulating {len(orders)} orders for block {context.block_number}")
+            logger.info(f"Using onchain block data: hash={context.block_hash}")
+            if self.config.state_provider_type == StateProviderType.ALCHEMY:
+                simulator = EVMSimulator(parent_state_provider, context)
+                logger.info(f"Using enhanced EVM-based simulation with onchain block context (parent state root)")
+                results = []
+                for order in orders:
+                    result = simulator.simulate_order(order)
+                    results.append(result)
+            else:
+                simulator = SimpleOrderSimulator(self.state_provider_factory)
+                results = simulator.simulate_orders(orders, context)
+                logger.info(f"Using simple validation-based simulation")
             
             # Log summary
             successful = sum(1 for r in results if r.simulation_result.success)
@@ -95,23 +98,12 @@ class SimulationOrchestrator:
             total_gas = sum(r.simulation_result.gas_used for r in results if r.simulation_result.success)
             total_profit = sum(r.simulation_result.coinbase_profit for r in results if r.simulation_result.success)
             
-            logger.info(f"Simulation completed: {successful} successful, {failed} failed")
+            logger.info(f"Block {context.block_number} simulation completed: {successful} successful, {failed} failed")
             logger.info(f"Total gas used: {total_gas}, Total coinbase profit: {total_profit} wei")
-            
-            if self.config.log_simulation_details:
-                for i, result in enumerate(results):
-                    sr = result.simulation_result
-                    logger.debug(f"Order {i}: {sr.success}, gas={sr.gas_used}, profit={sr.coinbase_profit}")
-                    if not sr.success:
-                        logger.debug(f"  Error: {sr.error}, {sr.error_message}")
             
             return results
             
         except Exception as e:
-            logger.error(f"Simulation failed: {e}")
+            logger.error(f"Block simulation failed: {e}")
             raise
     
-    def simulate_single_order(self, order: Order, block_number: int) -> SimulatedOrder:
-        """Simulate a single order"""
-        results = self.simulate_orders([order], block_number)
-        return results[0] if results else None

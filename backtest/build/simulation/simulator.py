@@ -1,7 +1,6 @@
 import logging
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
-from decimal import Decimal
 from enum import Enum
 
 from backtest.common.order import Order, OrderType
@@ -190,71 +189,6 @@ class SimpleOrderSimulator:
                 error=SimulationError.UNKNOWN_ERROR,
                 error_message=str(e)
             )
-    
-    def _decode_transaction_data(self, raw_tx: bytes) -> Dict[str, Any]:
-        """Decode transaction data from raw RLP bytes"""
-        try:
-            import rlp
-            
-            first_byte = raw_tx[0]
-            
-            if first_byte <= 0x7f:  # Typed transaction
-                tx_type = first_byte
-                payload = raw_tx[1:]
-                decoded_payload = rlp.decode(payload)
-                
-                if tx_type == 0x02:  # EIP-1559
-                    fields = decoded_payload
-                    return {
-                        'to': fields[5].hex() if fields[5] else None,
-                        'value': int.from_bytes(fields[6], 'big') if fields[6] else 0,
-                        'data': fields[7] if fields[7] else b'',
-                        'gas_limit': int.from_bytes(fields[4], 'big') if fields[4] else 21000,
-                    }
-                elif tx_type == 0x01:  # EIP-2930  
-                    fields = decoded_payload
-                    return {
-                        'to': fields[4].hex() if fields[4] else None,
-                        'value': int.from_bytes(fields[5], 'big') if fields[5] else 0,
-                        'data': fields[6] if fields[6] else b'',
-                        'gas_limit': int.from_bytes(fields[3], 'big') if fields[3] else 21000,
-                    }
-                elif tx_type == 0x03:  # EIP-4844 Blob
-                    # For blob txs, we need the canonical form
-                    tx_payload_body = decoded_payload[0]
-                    fields = tx_payload_body
-                    return {
-                        'to': fields[5].hex() if fields[5] else None,
-                        'value': int.from_bytes(fields[6], 'big') if fields[6] else 0,
-                        'data': fields[7] if fields[7] else b'',
-                        'gas_limit': int.from_bytes(fields[4], 'big') if fields[4] else 21000,
-                    }
-                else:
-                    # Unknown typed transaction, use defaults
-                    return {
-                        'to': None,
-                        'value': 0,
-                        'data': b'',
-                        'gas_limit': 21000,
-                    }
-            else:  # Legacy transaction
-                fields = rlp.decode(raw_tx)
-                return {
-                    'to': fields[3].hex() if fields[3] else None,
-                    'value': int.from_bytes(fields[4], 'big') if fields[4] else 0,
-                    'data': fields[5] if fields[5] else b'',
-                    'gas_limit': int.from_bytes(fields[2], 'big') if fields[2] else 21000,
-                }
-                
-        except Exception as e:
-            logger.warning(f"Failed to decode transaction data: {e}, using defaults")
-            # Fallback to safe defaults
-            return {
-                'to': None,
-                'value': 0,
-                'data': b'',
-                'gas_limit': 21000,
-            }
     
     def _calculate_intrinsic_gas(self, to_address: str, data) -> int:
         """Calculate intrinsic gas cost for a transaction"""
