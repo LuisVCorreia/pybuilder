@@ -65,12 +65,11 @@ class StateProvider(ABC):
     """Abstract interface for accessing Ethereum state at a specific block"""
     
     @abstractmethod
-    def get_account(self, address: str, expected_nonce: Optional[int] = None) -> Optional[AccountInfo]:
+    def get_account(self, address: str) -> Optional[AccountInfo]:
         """Get account information (balance, nonce, code hash, storage root)
         
         Args:
             address: The account address  
-            expected_nonce: Optional hint for mock providers to return an account with this nonce
         """
         pass
     

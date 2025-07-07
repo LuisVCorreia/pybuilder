@@ -6,17 +6,14 @@ from enum import Enum
 from backtest.common.order import Order
 from backtest.common.block_data import BlockData
 from .state_provider import StateProviderFactory, SimulationContext
-from .mock_provider import MockStateProviderFactory
 from .rpc_provider import AlchemyStateProviderFactory
-from .simulator import SimpleOrderSimulator, SimulatedOrder
-from .evm_simulator import EVMSimulator
+from .evm_simulator import EVMSimulator, SimulatedOrder
 
 logger = logging.getLogger(__name__)
 
 
 class StateProviderType(Enum):
     """Types of state providers"""
-    MOCK = "mock"
     ALCHEMY = "alchemy"
 
 @dataclass
@@ -88,9 +85,7 @@ class SimulationOrchestrator:
                     result = simulator.simulate_order(order)
                     results.append(result)
             else:
-                simulator = SimpleOrderSimulator(self.state_provider_factory)
-                results = simulator.simulate_orders(orders, context)
-                logger.info(f"Using simple validation-based simulation")
+                raise ValueError(f"Unsupported state provider type: {self.config.state_provider_type}")
             
             # Log summary
             successful = sum(1 for r in results if r.simulation_result.success)

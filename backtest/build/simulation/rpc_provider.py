@@ -26,13 +26,11 @@ class AlchemyStateProvider(StateProvider):
         
         logger.info(f"Connected to Alchemy RPC at block {block_number}")
 
-    def get_account(self, address: str, expected_nonce: Optional[int] = None) -> Optional[AccountInfo]:
+    def get_account(self, address: str) -> Optional[AccountInfo]:
         """Get account information from Alchemy RPC
         
         Args:
             address: The account address
-            expected_nonce: For simulation purposes, if provided, we'll return an account 
-                          with this nonce if it's reasonably close to the actual nonce
         """
         try:
             address = to_checksum_address(address)
@@ -41,22 +39,11 @@ class AlchemyStateProvider(StateProvider):
             if cache_key in self._cache:
                 cached_account = self._cache[cache_key]
                 
-                # If expected_nonce is provided and reasonably close, adjust for simulation
-                if expected_nonce is not None:
-                    nonce_diff = abs(expected_nonce - cached_account.nonce)
-                    if nonce_diff <= 100:  # Within reasonable range
-                        # Return modified account with expected nonce for simulation
-                        return AccountInfo(
-                            balance=cached_account.balance,
-                            nonce=expected_nonce,
-                            bytecode_hash=cached_account.bytecode_hash
-                        )
-                
                 return cached_account
             
             # Get balance and nonce from RPC
             balance = self.w3.eth.get_balance(address, block_identifier=self.block_number)
-            actual_nonce = self.w3.eth.get_transaction_count(address, block_identifier=self.block_number)
+            nonce = self.w3.eth.get_transaction_count(address, block_identifier=self.block_number)
             
             logger.info(f"DEBUGGING: Alchemy RPC returned balance={balance} wei for {address} at block {self.block_number}")
             
@@ -65,30 +52,13 @@ class AlchemyStateProvider(StateProvider):
             print("code returned:", code.hex())
             bytecode_hash = Web3.keccak(code).hex() if code else "0x" + "0" * 64
             
-            # Determine which nonce to use
-            if expected_nonce is not None:
-                nonce_diff = abs(expected_nonce - actual_nonce)
-                if nonce_diff <= 100:  # Within reasonable range for simulation
-                    nonce = expected_nonce
-                else:
-                    logger.debug(f"Expected nonce {expected_nonce} too far from actual {actual_nonce} for {address}")
-                    nonce = actual_nonce
-            else:
-                nonce = actual_nonce
-            
             account_info = AccountInfo(
                 balance=balance,
                 nonce=nonce,
                 bytecode_hash=bytecode_hash
             )
-            
-            # Cache the original account info (with actual nonce)
-            original_account = AccountInfo(
-                balance=balance,
-                nonce=actual_nonce,
-                bytecode_hash=bytecode_hash
-            )
-            self._cache[cache_key] = original_account
+
+            self._cache[cache_key] = account_info
             
             return account_info
             

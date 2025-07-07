@@ -1,13 +1,46 @@
 import logging
 from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareBundleOrder
 from .state_provider import StateProvider, SimulationContext
-from .simulator import SimulationResult, SimulationError, SimulatedOrder
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+from enum import Enum
 
 from boa.vm.py_evm import Address
 from boa.rpc import EthereumRPC, to_hex, to_int, to_bytes
 from boa.environment import Env
 
 logger = logging.getLogger(__name__)
+
+class SimulationError(Enum):
+    """Types of simulation errors"""
+    INSUFFICIENT_BALANCE = "insufficient_balance"
+    INVALID_NONCE = "invalid_nonce"
+    GAS_LIMIT_EXCEEDED = "gas_limit_exceeded"
+    EXECUTION_REVERTED = "execution_reverted"
+    UNKNOWN_ERROR = "unknown_error"
+
+
+@dataclass
+class SimulationResult:
+    """Result of simulating an order"""
+    success: bool
+    gas_used: int
+    coinbase_profit: int  # in wei
+    error: Optional[SimulationError] = None
+    error_message: Optional[str] = None
+    state_changes: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class SimulatedOrder:
+    """An order with its simulation results"""
+    order: Order
+    simulation_result: SimulationResult
+    
+    @property
+    def sim_value(self):
+        """Alias for compatibility with rbuilder patterns"""
+        return self.simulation_result
 
 class EVMSimulator:
     def __init__(self,

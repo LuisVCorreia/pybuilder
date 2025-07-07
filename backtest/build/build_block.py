@@ -1,6 +1,6 @@
 import logging
 from backtest.common.store import HistoricalDataStorage
-from backtest.build.simulation.evm_utils import simulate_orders_with_alchemy_evm, simulate_orders_with_mock_provider
+from backtest.build.simulation.evm_utils import simulate_orders_with_alchemy_evm
 
 logger = logging.getLogger(__name__)
 
