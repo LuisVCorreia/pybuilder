@@ -71,16 +71,26 @@ def run_backtest(args, config):
     logger.info(f"Failed simulations: {len(failed_sims)}")
 
     if successful_sims:
-        total_profit = sum(sim.simulation_result.coinbase_profit for sim in successful_sims)
-        total_gas = sum(sim.simulation_result.gas_used for sim in successful_sims)
+        # Use sim_value for successful orders (preferred way)
+        total_profit = sum(sim.sim_value.coinbase_profit for sim in successful_sims)
+        total_gas = sum(sim.sim_value.gas_used for sim in successful_sims)
+        total_blob_gas = sum(sim.sim_value.blob_gas_used for sim in successful_sims)
+        total_kickbacks = sum(sim.sim_value.paid_kickbacks for sim in successful_sims)
+        
         logger.info(f"Total simulated profit: {total_profit / 10**18:.6f} ETH")
         logger.info(f"Total simulated gas used: {total_gas:,}")
+        if total_blob_gas > 0:
+            logger.info(f"Total blob gas used: {total_blob_gas:,}")
+        if total_kickbacks > 0:
+            logger.info(f"Total kickbacks paid: {total_kickbacks / 10**18:.6f} ETH")
     
     # Show failed simulations for debugging
     if failed_sims:
         logger.info("Failed simulations:")
         for sim in failed_sims:
-            logger.info(f"  Order {sim.order.id()}: {sim.simulation_result.error} - {sim.simulation_result.error_message}")
+            error_info = sim.simulation_result.error if sim.simulation_result.error else "UNKNOWN"
+            error_msg = sim.simulation_result.error_message or "No error message"
+            logger.info(f"  Order {sim.order.id()}: {error_info} - {error_msg}")
 
     # Placeholder for builder logic
     logger.info("Running builders...")
