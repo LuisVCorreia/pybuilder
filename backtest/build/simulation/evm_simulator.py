@@ -1,15 +1,29 @@
 import logging
 from backtest.common.block_data import BlockData
-from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareBundleOrder
+from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareBundleOrder, TxNonce
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
+from collections import defaultdict
 
 from boa.vm.py_evm import Address
 from boa.rpc import EthereumRPC, to_hex, to_int, to_bytes
 from boa.environment import Env
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class NonceKey:
+    """Key for tracking nonce dependencies"""
+    address: str
+    nonce: int
+    
+    def __hash__(self):
+        return hash((self.address, self.nonce))
+    
+    def __eq__(self, other):
+        return isinstance(other, NonceKey) and self.address == other.address and self.nonce == other.nonce
 
 
 @dataclass
@@ -70,11 +84,11 @@ class SimulationContext:
         return context
 
 class SimulationError(Enum):
-    """Types of simulation errors"""
+    """Types of simulation errors that prevent transaction execution"""
     INSUFFICIENT_BALANCE = "insufficient_balance"
     INVALID_NONCE = "invalid_nonce"
     GAS_LIMIT_EXCEEDED = "gas_limit_exceeded"
-    EXECUTION_REVERTED = "execution_reverted"
+    VALIDATION_ERROR = "validation_error"
     UNKNOWN_ERROR = "unknown_error"
 
 
@@ -104,7 +118,11 @@ class EVMSimulator:
         self.context = simulation_context
         self.rpc = EthereumRPC(rpc_url)
         self.env = Env(fast_mode_enabled=True, fork_try_prefetch_state=True)    # Creates new environment with Py-EVM execution and remote RPC support
+        # Track nonces for dependency resolution
+        self.nonce_cache: Dict[str, int] = {}
+        self.simulated_orders: Dict[NonceKey, Order] = {}  # Track which orders have been simulated for each nonce
 
+        self.fork_at_block(self.context.block_number - 1)  # Fork at the parent block to simulate correctly
 
     def fork_at_block(self, block_number: int):
         """Fork the EVM state at the specified block number."""
@@ -145,59 +163,64 @@ class EVMSimulator:
         initial_from_balance = self.env.get_balance(from_addr)
         initial_to_balance = self.env.get_balance(to_addr) if to_addr else 0
 
+        # Calculate intrinsic gas cost (base transaction cost)
+        intrinsic_gas = 21000  # Base cost for any transaction
+        
+        # Add gas for calldata (input data)
+        if len(data) > 0:
+            for byte in data:
+                if byte == 0:
+                    intrinsic_gas += 4  # Cost for zero byte
+                else:
+                    intrinsic_gas += 16  # Cost for non-zero byte
+
+        # Pre-execution validation checks (these should mark transactions as failed)
+        total_tx_cost = value + (gas * gas_price)
+        if initial_from_balance < total_tx_cost:
+            return SimulationResult(
+                success=False,
+                gas_used=0,
+                error=SimulationError.INSUFFICIENT_BALANCE,
+                error_message=f"Insufficient balance: need {total_tx_cost}, have {initial_from_balance}"
+            )
+
+        if gas < intrinsic_gas:
+            return SimulationResult(
+                success=False,
+                gas_used=0,
+                error=SimulationError.GAS_LIMIT_EXCEEDED,
+                error_message=f"Gas limit too low: need {intrinsic_gas}, have {gas}"
+            )
+
         with self.env.anchor():
-            
             try:              
                 # Get the code at the target address if it's a contract call
                 code = b""
                 if to_addr:
                     code = self.env.get_code(to_addr)
-                
-                # Calculate intrinsic gas cost (base transaction cost)
-                intrinsic_gas = 21000  # Base cost for any transaction
-                
-                # Add gas for calldata (input data)
-                if len(data) > 0:
-                    for byte in data:
-                        if byte == 0:
-                            intrinsic_gas += 4  # Cost for zero byte
-                        else:
-                            intrinsic_gas += 16  # Cost for non-zero byte
                             
                 # For simple ETH transfers, we need to handle this differently
                 is_simple_transfer = len(data) == 0 and (not to_addr or len(code) == 0)
                 
                 if is_simple_transfer:
-                    
-                    # Check if sender has enough balance
-                    if initial_from_balance < value:
-                        result = SimulationResult(
-                            success=False,
-                            gas_used=intrinsic_gas,
-                            error=SimulationError.INSUFFICIENT_BALANCE,
-                            error_message="Insufficient balance for transfer"
-                        )
-                    else:
-                        # Perform the transfer
-                        self.env.set_balance(from_addr, initial_from_balance - value)
-                        if to_addr:
-                            self.env.set_balance(to_addr, initial_to_balance + value)
+                    # Simple ETH transfer
+                    self.env.set_balance(from_addr, initial_from_balance - value)
+                    if to_addr:
+                        self.env.set_balance(to_addr, initial_to_balance + value)
 
-                        result = SimulationResult(
-                            success=True,
-                            gas_used=intrinsic_gas,
-                            error=None,
-                            error_message=None,
-                            state_changes={
-                                "balances": {
-                                    from_addr: initial_from_balance - value,
-                                    to_addr: initial_to_balance + value
-                                }
+                    result = SimulationResult(
+                        success=True,
+                        gas_used=intrinsic_gas,
+                        error=None,
+                        error_message=None,
+                        state_changes={
+                            "balances": {
+                                from_addr: initial_from_balance - value,
+                                to_addr: initial_to_balance + value
                             }
-                        )
-
+                        }
+                    )
                 else:
-                    
                     # Execute the transaction using the EVM for contract calls
                     computation = self.env.execute_code(
                         to_address=to_addr,
@@ -215,12 +238,11 @@ class EVMSimulator:
                     gas_refund = computation.get_gas_refund()
                     total_gas_used = intrinsic_gas + execution_gas_used - gas_refund
                     
-                    # Collect results
                     result = SimulationResult(
-                        success=computation.is_success,
+                        success=True,  # Always true for executed transactions
                         gas_used=total_gas_used,
-                        error=None if computation.is_success else SimulationError.EXECUTION_REVERTED,
-                        error_message=None if computation.is_success else "Transaction execution reverted",
+                        error=None,
+                        error_message=None,
                         state_changes={
                             "balances": {
                                 from_addr: initial_from_balance - value,
@@ -233,8 +255,13 @@ class EVMSimulator:
                 return result
                 
             except Exception as e:
-                raise
-                # The anchor context manager will automatically revert the state
+                # Execution errors are treated as validation failures
+                return SimulationResult(
+                    success=False,
+                    gas_used=0,
+                    error=SimulationError.VALIDATION_ERROR,
+                    error_message=f"Transaction execution failed: {str(e)}"
+                )
 
 
     def simulate_tx_order(self, order: TxOrder) -> SimulatedOrder:
@@ -269,7 +296,7 @@ class EVMSimulator:
                 simulation_result=SimulationResult(
                     success=False,
                     gas_used=0,
-                    error=SimulationError.EXECUTION_REVERTED,
+                    error=SimulationError.VALIDATION_ERROR,
                     error_message=str(e)
                 )
             )
@@ -292,6 +319,7 @@ class EVMSimulator:
             total_gas_used = 0
             bundle_success = True
             error_message = None
+            
             for i, (child_order, optional) in enumerate(order.child_orders):
                 if hasattr(child_order, 'order_type') and child_order.order_type() == OrderType.TX:
                     tx_data = child_order.get_transaction_data() if hasattr(child_order, 'get_transaction_data') else None
@@ -305,6 +333,7 @@ class EVMSimulator:
                             'value': 0,
                             'input': '0x'
                         }
+                    
                     tx_result = self._execute_tx(tx_data)
                     if not tx_result.success and not optional:
                         bundle_success = False
@@ -320,7 +349,7 @@ class EVMSimulator:
             result = SimulationResult(
                 success=bundle_success,
                 gas_used=total_gas_used,
-                error=None if bundle_success else SimulationError.EXECUTION_REVERTED,
+                error=None if bundle_success else SimulationError.VALIDATION_ERROR,
                 error_message=error_message
             )
             return SimulatedOrder(
@@ -335,7 +364,7 @@ class EVMSimulator:
                 simulation_result=SimulationResult(
                     success=False,
                     gas_used=0,
-                    error=SimulationError.EXECUTION_REVERTED,
+                    error=SimulationError.VALIDATION_ERROR,
                     error_message=str(e)
                 )
             )
@@ -355,9 +384,63 @@ class EVMSimulator:
             )
         return self.simulate_bundle_order(order)  # Only call with correct type
     
-    def simulate_order(self, order: Order) -> SimulatedOrder:
-        """Simulate any type of order"""
-        # Only call the correct simulation method for the order type
+    def simulate_order_with_parents(self, order: Order, parent_orders: List[Order] = None) -> SimulatedOrder:
+        """
+        Simulate an order, including any required parent orders first.
+        This mirrors rbuilder's simulate_order_using_fork functionality.
+        """
+        if parent_orders is None:
+            parent_orders = []
+            
+        try:
+            # Create a rollback point to restore state if needed
+            rollback_point = self._create_rollback_point()
+            
+            # First simulate all parent orders
+            total_gas_used = 0
+            for parent_order in parent_orders:
+                parent_result = self._simulate_single_order(parent_order)
+                if not parent_result.simulation_result.success:
+                    # Parent failed, rollback and return failure
+                    self._rollback_to_point(rollback_point)
+                    return SimulatedOrder(
+                        order=order,
+                        simulation_result=SimulationResult(
+                            success=False,
+                            gas_used=0,
+                            error=SimulationError.VALIDATION_ERROR,
+                            error_message=f"Parent order failed: {parent_result.simulation_result.error_message}"
+                        )
+                    )
+                total_gas_used += parent_result.simulation_result.gas_used
+                # Record parent execution for nonce tracking
+                self._record_order_execution(parent_order)
+            
+            # Now simulate the main order
+            result = self._simulate_single_order(order)
+            if result.simulation_result.success:
+                result.simulation_result.gas_used += total_gas_used
+                self._record_order_execution(order)
+            else:
+                # Main order failed, rollback
+                self._rollback_to_point(rollback_point)
+                
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to simulate order with parents {order.id()}: {e}")
+            return SimulatedOrder(
+                order=order,
+                simulation_result=SimulationResult(
+                    success=False,
+                    gas_used=0,
+                    error=SimulationError.VALIDATION_ERROR,
+                    error_message=str(e)
+                )
+            )
+    
+    def _simulate_single_order(self, order: Order) -> SimulatedOrder:
+        """Simulate a single order without parent handling"""
         if hasattr(order, 'order_type'):
             otype = order.order_type()
             if otype == OrderType.TX and isinstance(order, TxOrder):
@@ -402,10 +485,103 @@ class EVMSimulator:
                     error_message="Order does not have order_type method."
                 )
             )
+    
+    def simulate_order(self, order: Order) -> SimulatedOrder:
+        """
+        Simulate any type of order, automatically handling parent dependencies.
+        This is the main entry point that mirrors rbuilder's behavior.
+        """
+        # Check if order dependencies are satisfied
+        is_ready, parent_orders = self._check_order_dependencies(order)
+        
+        if not is_ready:
+            logger.warning(f"Order {order.id()} dependencies not satisfied, skipping")
+            return SimulatedOrder(
+                order=order,
+                simulation_result=SimulationResult(
+                    success=False,
+                    gas_used=0,
+                    error=SimulationError.INVALID_NONCE,
+                    error_message="Order dependencies not satisfied"
+                )
+            )
+        
+        return self.simulate_order_with_parents(order, parent_orders)
+
+    def _get_account_nonce(self, address: str) -> int:
+        """Get the current nonce for an account, with caching"""
+        if address not in self.nonce_cache:
+            # Get nonce from forked state - need canonical address (bytes)
+            addr = Address(address)
+            nonce = self.env.evm.vm.state.get_nonce(addr.canonical_address)
+            self.nonce_cache[address] = nonce
+        return self.nonce_cache[address]
+    
+    def _update_account_nonce(self, address: str, new_nonce: int):
+        """Update the cached nonce for an account"""
+        self.nonce_cache[address] = new_nonce
+        # Also update the EVM state if needed
+        addr = Address(address)
+        self.env.evm.vm.state.set_nonce(addr.canonical_address, new_nonce)
+    
+    def _check_order_dependencies(self, order: Order) -> Tuple[bool, List[Order]]:
+        """
+        Check if an order's nonce dependencies are satisfied.
+        Returns (is_ready, parent_orders_needed)
+        """
+        parent_orders = []
+        
+        for tx_nonce in order.nonces():
+            current_nonce = self._get_account_nonce(tx_nonce.address)
+            
+            if tx_nonce.nonce == current_nonce:
+                # This nonce is ready to execute
+                continue
+            elif tx_nonce.nonce < current_nonce:
+                # Nonce is already used
+                if not tx_nonce.optional:
+                    # Required nonce is invalid, order cannot execute
+                    return False, []
+                else:
+                    # Optional nonce, can skip
+                    continue
+            else:
+                # tx_nonce.nonce > current_nonce, need parent orders
+                nonce_key = NonceKey(tx_nonce.address, tx_nonce.nonce)
+                if nonce_key in self.simulated_orders:
+                    # We have a simulated order that satisfies this nonce
+                    parent_orders.append(self.simulated_orders[nonce_key])
+                else:
+                    # Missing dependency, order is not ready
+                    return False, []
+        
+        return True, parent_orders
+    
+    def _record_order_execution(self, order: Order):
+        """Record that an order has been executed and update nonce tracking"""
+        for tx_nonce in order.nonces():
+            current_nonce = self._get_account_nonce(tx_nonce.address)
+            if tx_nonce.nonce >= current_nonce:
+                # Update nonce and record the order
+                self._update_account_nonce(tx_nonce.address, tx_nonce.nonce + 1)
+                nonce_key = NonceKey(tx_nonce.address, tx_nonce.nonce)
+                self.simulated_orders[nonce_key] = order
+
+    def _create_rollback_point(self):
+        """Create a rollback point to restore state if needed"""
+        # Use the env's anchor context manager functionality
+        return self.env.anchor()
+    
+    def _rollback_to_point(self, rollback_point):
+        """Rollback to a previous state point"""
+        # The anchor context manager handles rollback automatically when exited
+        # This is a placeholder (the actual rollback happens in the context manager)
+        pass
 
 def simulate_orders(orders: List[Order], block_data: BlockData, rpc_url: str) -> List[SimulatedOrder]:
     """
     Simulate orders using onchain block data for proper context.
+    Implements order dependency resolution similar to rbuilder's SimTree.
     
     Args:
         orders: List of orders to simulate
@@ -422,20 +598,58 @@ def simulate_orders(orders: List[Order], block_data: BlockData, rpc_url: str) ->
 
         simulator = EVMSimulator(context, rpc_url)
         logger.info(f"Using EVM-based simulation with onchain block context (parent state root)")
+        
         results = []
-        for order in orders:
-            result = simulator.simulate_order(order)
-            results.append(result)
+        
+        # Sort orders to process dependencies properly
+        # Simple approach: process orders in multiple passes until no more can be processed
+        remaining_orders = orders.copy()
+        max_passes = len(orders) + 1  # Safety limit to prevent infinite loops
+        
+        for pass_num in range(max_passes):
+            if not remaining_orders:
+                break
+                
+            processed_this_pass = False
+            
+            for order in remaining_orders.copy():
+                # Check if this order's dependencies are satisfied
+                is_ready, parent_orders = simulator._check_order_dependencies(order)
+                
+                if is_ready:
+                    logger.debug(f"Pass {pass_num}: Simulating order {order.id()} with {len(parent_orders)} parents")
+                    result = simulator.simulate_order_with_parents(order, parent_orders)
+                    results.append(result)
+                    processed_this_pass = True
 
+                    # Update remaining orders list
+                    remaining_orders.remove(order)
+                    
+            # If we didn't process any orders in this pass, remaining orders have unresolvable dependencies
+            if not processed_this_pass:
+                logger.warning(f"Pass {pass_num}: No orders could be processed, {len(remaining_orders)} orders have unresolvable dependencies")
+                # Add failed orders to results
+                for order in remaining_orders:
+                    failed_result = SimulatedOrder(
+                        order=order,
+                        simulation_result=SimulationResult(
+                            success=False,
+                            gas_used=0,
+                            error=SimulationError.INVALID_NONCE,
+                            error_message="Unresolvable nonce dependencies"
+                        )
+                    )
+                    results.append(failed_result)
+                break
+        
         # Log summary
         successful = sum(1 for r in results if r.simulation_result.success)
         failed = len(results) - successful
         total_gas = sum(r.simulation_result.gas_used for r in results if r.simulation_result.success)
-        total_profit = sum(r.simulation_result.coinbase_profit for r in results if r.simulation_result.success)
         
         logger.info(f"Block {context.block_number} simulation completed: {successful} successful, {failed} failed")
-        logger.info(f"Total gas used: {total_gas}, Total coinbase profit: {total_profit} wei")
-        
+        logger.info(f"Total gas used: {total_gas}")
+
         return results
         
     except Exception as e:

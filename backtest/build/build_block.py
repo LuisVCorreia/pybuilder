@@ -69,7 +69,7 @@ def run_backtest(args, config):
     
     logger.info(f"Successful simulations: {len(successful_sims)}")
     logger.info(f"Failed simulations: {len(failed_sims)}")
-    
+
     if successful_sims:
         total_profit = sum(sim.simulation_result.coinbase_profit for sim in successful_sims)
         total_gas = sum(sim.simulation_result.gas_used for sim in successful_sims)
@@ -79,7 +79,7 @@ def run_backtest(args, config):
     # Show failed simulations for debugging
     if failed_sims:
         logger.info("Failed simulations:")
-        for sim in failed_sims[:5]:  # Show first 5 failures
+        for sim in failed_sims:
             logger.info(f"  Order {sim.order.id()}: {sim.simulation_result.error} - {sim.simulation_result.error_message}")
 
     # Placeholder for builder logic
