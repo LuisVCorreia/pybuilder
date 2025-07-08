@@ -1,6 +1,7 @@
 import logging
+import os
 from backtest.common.store import HistoricalDataStorage
-from backtest.build.simulation.evm_utils import simulate_orders_with_alchemy_evm
+from backtest.build.simulation.evm_simulator import simulate_orders
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +18,7 @@ class LandedBlockFromDBOrdersSource:
         if args.only_order_ids:
             block_data.filter_orders_by_ids(args.only_order_ids)
 
-        if args.block_building_time_ms > 0:
-            block_data.filter_late_orders(args.block_building_time_ms)
+        block_data.filter_late_orders(args.block_building_time_ms)
 
         if args.show_missing:
             self.show_missing_txs(block_data)
@@ -52,8 +52,15 @@ def run_backtest(args, config):
     # Extract just the Order objects for simulation
     order_objects = [order_with_ts.order for order_with_ts in orders]
 
+    rpc_url = config.get('fetch_rpc_url')
+    if not rpc_url:
+        raise ValueError("fetch_rpc_url not found in config")
+    
+    # Expand environment variables in the URL
+    rpc_url = os.path.expandvars(rpc_url)
+
     logger.info("Simulating orders...")
-    simulated_orders = simulate_orders_with_alchemy_evm(order_objects, order_source.block_data, config)
+    simulated_orders = simulate_orders(order_objects, order_source.block_data, rpc_url)
     logger.info(f"Simulation complete. Got {len(simulated_orders)} simulated orders.")
     
     # Print simulation results
