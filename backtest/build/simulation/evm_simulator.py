@@ -4,11 +4,15 @@ from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareB
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
-from collections import defaultdict
 
 from boa.vm.py_evm import Address
 from boa.rpc import EthereumRPC, to_hex, to_int, to_bytes
 from boa.environment import Env
+
+from eth.vm.forks.london.transactions import DynamicFeeTransaction
+from eth.vm.forks.cancun.transactions import CancunTypedTransaction
+from eth.vm.forks.cancun.transactions import CancunLegacyTransaction
+from eth.vm.forks.cancun.headers import CancunBlockHeader
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +151,7 @@ class EVMSimulator:
         self.nonce_cache: Dict[str, int] = {}
         self.simulated_orders: Dict[NonceKey, Order] = {}  # Track which orders have been simulated for each nonce
 
-        print("Initializing EVMSimulator with context:", self.context)
         self.fork_at_block(self.context.block_number - 1)  # Fork at the parent block to simulate correctly
-        print("EVM environment initialized with fork at block:", self.context.block_number - 1)
 
     def fork_at_block(self, block_number: int):
         """Fork the EVM state at the specified block number."""
@@ -179,19 +181,34 @@ class EVMSimulator:
         """Simulate a transaction execution."""
 
         # Extract transaction parameters
+        tx_type = tx_data["type"]
+        tx_type_int = self._safe_to_int(tx_type) if tx_type else 0
         from_addr = Address(tx_data["from"])
         to_addr = Address(tx_data["to"]) if tx_data["to"] else None
         value = self._safe_to_int(tx_data["value"])
         gas = self._safe_to_int(tx_data["gas"])
         gas_price = self._safe_to_int(tx_data["gasPrice"])
         data = self._safe_to_bytes(tx_data["input"])
+        nonce = self._safe_to_int(tx_data["nonce"])
 
-        # Get initial balances for validation
+        # Extract signature fields
+        r = self._safe_to_int(tx_data["r"])
+        s = self._safe_to_int(tx_data["s"])
+
+
+        if tx_type_int == 2:  # EIP-1559 transaction
+            y_parity = self._safe_to_int(tx_data["y_parity"])
+            max_fee_per_gas = self._safe_to_int(tx_data["maxFeePerGas"])
+            max_priority_fee_per_gas = self._safe_to_int(tx_data["maxPriorityFeePerGas"])
+        else:
+            v = self._safe_to_int(tx_data["v"])
+            gas_price = self._safe_to_int(tx_data["gasPrice"])
+
+        # Get initial balances
         initial_from_balance = self.env.get_balance(from_addr)
         initial_to_balance = self.env.get_balance(to_addr) if to_addr else 0
 
-        # Capture coinbase balance before execution
-        coinbase_addr = Address(self.context.coinbase)
+        coinbase_addr = self.env.evm.vm.state.coinbase  # TODO: Find way to context.coinbase
         initial_coinbase_balance = self.env.get_balance(coinbase_addr)
 
         # Calculate intrinsic gas cost (base transaction cost)
@@ -206,6 +223,9 @@ class EVMSimulator:
                     intrinsic_gas += 16  # Cost for non-zero byte
 
         # Pre-execution validation checks (these should mark transactions as failed)
+        # TODO: Since we are now using apply_transaction, we can remove these validation checks
+        # Apply_transaction begins by running validation checks on the tx
+        # Need to check if error is of type ValidationError
         total_tx_cost = value + (gas * gas_price)
         if initial_from_balance < total_tx_cost:
             return OrderSimResult(
@@ -223,86 +243,100 @@ class EVMSimulator:
                 error_message=f"Gas limit too low: need {intrinsic_gas}, have {gas}"
             )
 
-        with self.env.anchor():
-            try:             
-                # Get the code at the target address if it's a contract call
-                code = b""
-                if to_addr:
-                    code = self.env.get_code(to_addr)
-
-                # For simple ETH transfers, we need to handle this differently
-                is_simple_transfer = len(data) == 0 and (not to_addr or len(code) == 0)
-
-                if is_simple_transfer:
-                    # Simple ETH transfer
-                    self.env.set_balance(from_addr, initial_from_balance - value)
-                    if to_addr:
-                        self.env.set_balance(to_addr, initial_to_balance + value)
-
-                        # Calculate coinbase profit after transaction
-                        final_coinbase_balance = self.env.get_balance(coinbase_addr)
-                        coinbase_profit = self._calculate_coinbase_profit(initial_coinbase_balance, final_coinbase_balance)
-
-                        result = OrderSimResult(
-                        success=True,
-                        gas_used=intrinsic_gas,
-                        coinbase_profit=coinbase_profit,
-                        error=None,
-                        error_message=None,
-                        state_changes={
-                            "balances": {
-                                from_addr: initial_from_balance - value,
-                                to_addr: initial_to_balance + value
-                            }
-                        }
-                    )
-                else:
-                    # Execute the transaction using the EVM for contract calls
-                    computation = self.env.execute_code(
-                        to_address=to_addr,
-                        sender=from_addr,
-                        gas=gas - intrinsic_gas,  # Subtract intrinsic gas from available gas
-                        value=value,
-                        override_bytecode=code,
-                        data=data,
-                        is_modifying=True,
-                        simulate=False,
-                    )
-
-                    # Calculate total gas used (intrinsic + execution)
-                    execution_gas_used = computation.get_gas_used()
-                    gas_refund = computation.get_gas_refund()
-                    total_gas_used = intrinsic_gas + execution_gas_used - gas_refund
-
-                    # Calculate coinbase profit after transaction
-                    final_coinbase_balance = self.env.get_balance(coinbase_addr)
-                    coinbase_profit = self._calculate_coinbase_profit(initial_coinbase_balance, final_coinbase_balance)
-
-                    result = OrderSimResult(
-                        success=True,  # Always true for executed transactions
-                        gas_used=total_gas_used,
-                        coinbase_profit=coinbase_profit,
-                        error=None,
-                        error_message=None,
-                        state_changes={
-                            "balances": {
-                                from_addr: initial_from_balance - value,
-                                to_addr: initial_to_balance + value if to_addr else initial_to_balance
-                            },
-                            "logs": computation.get_log_entries()
-                        }
-                    )
-
-                return result
-
-            except Exception as e:
-                # Execution errors are treated as validation failures
-                return OrderSimResult(
-                    success=False,
-                    gas_used=0,
-                    error=SimulationError.VALIDATION_ERROR,
-                    error_message=f"Transaction execution failed: {str(e)}"
+        try:
+            if tx_type_int == 2:                 
+                # Create Type 2 transaction object
+                inner_tx = DynamicFeeTransaction(
+                    chain_id=1,  # Mainnet
+                    nonce=nonce,
+                    max_priority_fee_per_gas=max_priority_fee_per_gas,
+                    max_fee_per_gas=max_fee_per_gas,
+                    gas=gas,
+                    to=to_addr.canonical_address if to_addr else b'',
+                    value=value,
+                    data=data,
+                    access_list=[],  # Empty access list for now
+                    y_parity=y_parity,
+                    r=r,
+                    s=s,
                 )
+                
+                tx = CancunTypedTransaction(2, inner_tx)
+                
+            else:  # Legacy transaction                    
+                tx = CancunLegacyTransaction(
+                    nonce=nonce,
+                    gas_price=gas_price,
+                    gas=gas,
+                    to=to_addr.canonical_address if to_addr else b'',
+                    value=value,
+                    data=data,
+                    v=v,
+                    r=r,
+                    s=s,
+                )
+            
+            vm = self.env.evm.vm
+            vm_header = vm.get_header()  # Default block header
+            
+            # Create proper block header using simulation context
+            header = CancunBlockHeader(
+                parent_hash=self.context.parent_hash if self.context.parent_hash else vm_header.parent_hash,
+                uncles_hash=vm_header.uncles_hash,
+                coinbase=to_bytes(self.context.coinbase),
+                state_root=vm_header.state_root,
+                transaction_root=vm_header.transaction_root,
+                receipt_root=vm_header.receipt_root,
+                bloom=0,
+                difficulty=self.context.block_difficulty,
+                block_number=self.context.block_number,
+                gas_limit=self.context.block_gas_limit,
+                gas_used=0,
+                timestamp=self.context.block_timestamp,
+                extra_data=b'',
+                mix_hash=b'\x00' * 32,
+                nonce=b'\x00' * 8,
+                base_fee_per_gas=self.context.block_base_fee,
+                withdrawals_root=self.context.withdrawals_root,
+                blob_gas_used=self.context.blob_gas_used,
+                excess_blob_gas=self.context.excess_blob_gas,
+            )
+
+            # Apply the transaction with the header
+            receipt, computation = vm.apply_transaction(header, tx)
+
+            final_coinbase_balance = self.env.get_balance(coinbase_addr)
+            coinbase_profit = self._calculate_coinbase_profit(initial_coinbase_balance, final_coinbase_balance)
+
+            result = OrderSimResult(
+                success=True,  # Always true for executed transactions TODO: not anymore now that we're using apply_transaction
+                gas_used=receipt.gas_used,
+                coinbase_profit=coinbase_profit,
+                error=None,
+                error_message=None,
+                state_changes={
+                    "balances": {
+                        from_addr: initial_from_balance,
+                        to_addr: initial_to_balance,
+                        coinbase_addr: initial_coinbase_balance,
+                    },
+                    "logs": computation.get_log_entries()
+                }
+            )
+
+            return result
+
+        except Exception as e:
+            # Execution errors are treated as validation failures
+            print(f"Transaction execution failed: {type(e).__name__}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return OrderSimResult(
+                success=False,
+                gas_used=0,
+                error=SimulationError.VALIDATION_ERROR,
+                error_message=f"Transaction execution failed: {str(e)}"
+            )
 
 
     def simulate_tx_order(self, order: TxOrder) -> SimulatedOrder:
@@ -321,7 +355,7 @@ class EVMSimulator:
         try:
             tx_data = order.get_transaction_data()
             result = self._execute_tx(tx_data)
-            logger.info(f"Simulation result: {result.success}, gas used: {result.gas_used}")
+            logger.info(f"Simulation result: {result.success}, gas used: {result.gas_used}, coinbase profit: {result.coinbase_profit}")
             return self._convert_result_to_simulated_order(order, result)
         except Exception as e:
             logger.error(f"Failed to simulate tx order {getattr(order, 'id', lambda: '?')()}: {e}")
