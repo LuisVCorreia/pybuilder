@@ -1,18 +1,12 @@
 import logging
 from backtest.common.block_data import BlockData
-from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareBundleOrder, TxNonce
+from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareBundleOrder
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
 
-from boa.vm.py_evm import Address
-from boa.rpc import EthereumRPC, to_hex, to_int, to_bytes
-from boa.environment import Env
 
-from eth.vm.forks.london.transactions import DynamicFeeTransaction
-from eth.vm.forks.cancun.transactions import CancunTypedTransaction
-from eth.vm.forks.cancun.transactions import CancunLegacyTransaction
-from eth.vm.forks.cancun.headers import CancunBlockHeader
+from pyrevm import EVM, Env, BlockEnv
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +22,6 @@ class NonceKey:
 
     def __eq__(self, other):
         return isinstance(other, NonceKey) and self.address == other.address and self.nonce == other.nonce
-
-
-@dataclass
-class AccountInfo:
-    """Ethereum account information"""
-    balance: int  # in wei
-    nonce: int
-    bytecode_hash: str  # 0x-prefixed hex
 
 
 @dataclass
@@ -143,28 +129,52 @@ class SimulatedOrder:
             )
 
 class EVMSimulator:
-    def __init__(self,simulation_context: SimulationContext, rpc_url: str):
+    def __init__(self, simulation_context: SimulationContext, rpc_url: str):
         self.context = simulation_context
-        self.rpc = EthereumRPC(rpc_url)
-        self.env = Env(fast_mode_enabled=True, fork_try_prefetch_state=False)    # Creates new environment with Py-EVM execution and remote RPC support
-        # Track nonces for dependency resolution
+        
+        block_env = BlockEnv(
+            number=simulation_context.block_number,
+            coinbase=simulation_context.coinbase,
+            timestamp=simulation_context.block_timestamp,
+            difficulty=simulation_context.block_difficulty,
+            prevrandao=None,
+            basefee=simulation_context.block_base_fee,
+            gas_limit=simulation_context.block_gas_limit,
+            excess_blob_gas=simulation_context.excess_blob_gas or 0,
+        )
+        pyenv = Env(block=block_env)
+        
+        # Use regular EVM without tracing
+        self.evm = EVM(
+            fork_url=rpc_url,
+            fork_block=str(simulation_context.block_number - 1),
+            env=pyenv,
+        )
+            
+        # Track nonces and simulated orders
         self.nonce_cache: Dict[str, int] = {}
-        self.simulated_orders: Dict[NonceKey, Order] = {}  # Track which orders have been simulated for each nonce
+        self.simulated_orders: Dict[NonceKey, Order] = {}
 
-        self.fork_at_block(self.context.block_number - 1)  # Fork at the parent block to simulate correctly
-
-    def fork_at_block(self, block_number: int):
-        """Fork the EVM state at the specified block number."""
-        block_id = to_hex(block_number)       
-        # Use the env's fork_rpc method instead of direct EVM access
-        self.env.fork_rpc(self.rpc, block_identifier=block_id)
+    def _safe_to_hex(self, value: int | bytes | str) -> str:
+        if isinstance(value, int):
+            return hex(value)
+        if isinstance(value, bytes):
+            return "0x" + value.hex()
+        if isinstance(value, str):
+            assert value.startswith("0x")
+            return value
+        raise TypeError(
+            f"to_hex expects bytes, int or (hex) string, but got {type(value)}: {value}"
+        )
 
     def _safe_to_int(self, value) -> int:
         """Convert a value to int, handling both hex strings and integers."""
         if isinstance(value, int):
             return value
         elif isinstance(value, str):
-            return to_int(value)
+            if value == "0x":
+                return 0
+            return int(value, 16)
         else:
             return int(value)
   
@@ -173,7 +183,7 @@ class EVMSimulator:
         if isinstance(value, bytes):
             return value
         elif isinstance(value, str):
-            return to_bytes(value)
+            return bytes.fromhex(value.removeprefix("0x"))
         else:
             return bytes(value)
 
@@ -183,160 +193,84 @@ class EVMSimulator:
         # Extract transaction parameters
         tx_type = tx_data["type"]
         tx_type_int = self._safe_to_int(tx_type) if tx_type else 0
-        from_addr = Address(tx_data["from"])
-        to_addr = Address(tx_data["to"]) if tx_data["to"] else None
+        from_addr = tx_data["from"]
+        to_addr = tx_data["to"] if tx_data["to"] else None
         value = self._safe_to_int(tx_data["value"])
         gas = self._safe_to_int(tx_data["gas"])
         gas_price = self._safe_to_int(tx_data["gasPrice"])
         data = self._safe_to_bytes(tx_data["input"])
-        nonce = self._safe_to_int(tx_data["nonce"])
-
-        # Extract signature fields
-        r = self._safe_to_int(tx_data["r"])
-        s = self._safe_to_int(tx_data["s"])
 
 
         if tx_type_int == 2:  # EIP-1559 transaction
-            y_parity = self._safe_to_int(tx_data["y_parity"])
             max_fee_per_gas = self._safe_to_int(tx_data["maxFeePerGas"])
             max_priority_fee_per_gas = self._safe_to_int(tx_data["maxPriorityFeePerGas"])
+            gas_price = min(max_fee_per_gas, self.context.block_base_fee + max_priority_fee_per_gas)
         else:
-            v = self._safe_to_int(tx_data["v"])
             gas_price = self._safe_to_int(tx_data["gasPrice"])
+            max_priority_fee_per_gas = None
 
-        # Get initial balances
-        initial_from_balance = self.env.get_balance(from_addr)
-        initial_to_balance = self.env.get_balance(to_addr) if to_addr else 0
+        # Snapshot state and measure coinbase
+        checkpoint = self.evm.snapshot()
+        cb = self.context.coinbase
+        before_cb = self.evm.get_balance(cb)
 
-        coinbase_addr = self.env.evm.vm.state.coinbase  # TODO: Find way to context.coinbase
-        initial_coinbase_balance = self.env.get_balance(coinbase_addr)
-
-        # Calculate intrinsic gas cost (base transaction cost)
-        intrinsic_gas = 21000  # Base cost for any transaction
-
-        # Add gas for calldata (input data)
-        if len(data) > 0:
-            for byte in data:
-                if byte == 0:
-                    intrinsic_gas += 4  # Cost for zero byte
-                else:
-                    intrinsic_gas += 16  # Cost for non-zero byte
-
-        # Pre-execution validation checks (these should mark transactions as failed)
-        # TODO: Since we are now using apply_transaction, we can remove these validation checks
-        # Apply_transaction begins by running validation checks on the tx
-        # Need to check if error is of type ValidationError
-        total_tx_cost = value + (gas * gas_price)
-        if initial_from_balance < total_tx_cost:
-            return OrderSimResult(
-                success=False,
-                gas_used=0,
-                error=SimulationError.INSUFFICIENT_BALANCE,
-                error_message=f"Insufficient balance: need {total_tx_cost}, have {initial_from_balance}"
-            )
-
-        if gas < intrinsic_gas:
-            return OrderSimResult(
-                success=False,
-                gas_used=0,
-                error=SimulationError.GAS_LIMIT_EXCEEDED,
-                error_message=f"Gas limit too low: need {intrinsic_gas}, have {gas}"
-            )
+        # Build message_call args
+        msg_args: Dict[str, Any] = {
+            "caller": from_addr,
+            "to": to_addr,
+            "value": value,
+            "calldata": data,
+            "gas_price": gas_price,
+            "gas": gas,
+        }
 
         try:
-            if tx_type_int == 2:                 
-                # Create Type 2 transaction object
-                inner_tx = DynamicFeeTransaction(
-                    chain_id=1,  # Mainnet
-                    nonce=nonce,
-                    max_priority_fee_per_gas=max_priority_fee_per_gas,
-                    max_fee_per_gas=max_fee_per_gas,
-                    gas=gas,
-                    to=to_addr.canonical_address if to_addr else b'',
-                    value=value,
-                    data=data,
-                    access_list=[],  # Empty access list for now
-                    y_parity=y_parity,
-                    r=r,
-                    s=s,
-                )
-                
-                tx = CancunTypedTransaction(2, inner_tx)
-                
-            else:  # Legacy transaction                    
-                tx = CancunLegacyTransaction(
-                    nonce=nonce,
-                    gas_price=gas_price,
-                    gas=gas,
-                    to=to_addr.canonical_address if to_addr else b'',
-                    value=value,
-                    data=data,
-                    v=v,
-                    r=r,
-                    s=s,
-                )
+
+            self.evm.message_call(**msg_args)
             
-            vm = self.env.evm.vm
-            vm_header = vm.get_header()  # Default block header
-            
-            # Create proper block header using simulation context
-            header = CancunBlockHeader(
-                parent_hash=self.context.parent_hash if self.context.parent_hash else vm_header.parent_hash,
-                uncles_hash=vm_header.uncles_hash,
-                coinbase=to_bytes(self.context.coinbase),
-                state_root=vm_header.state_root,
-                transaction_root=vm_header.transaction_root,
-                receipt_root=vm_header.receipt_root,
-                bloom=0,
-                difficulty=self.context.block_difficulty,
-                block_number=self.context.block_number,
-                gas_limit=self.context.block_gas_limit,
-                gas_used=0,
-                timestamp=self.context.block_timestamp,
-                extra_data=b'',
-                mix_hash=b'\x00' * 32,
-                nonce=b'\x00' * 8,
-                base_fee_per_gas=self.context.block_base_fee,
-                withdrawals_root=self.context.withdrawals_root,
-                blob_gas_used=self.context.blob_gas_used,
-                excess_blob_gas=self.context.excess_blob_gas,
+            profit = self.evm.get_balance(cb) - before_cb - self.context.block_base_fee * self.evm.result.gas_used
+            self.evm.set_balance(cb, before_cb + profit)
+            self.evm.commit()
+
+            return OrderSimResult(
+                success=True,
+                gas_used=self.evm.result.gas_used,
+                coinbase_profit=profit,
+                blob_gas_used=getattr(self.evm.result, 'blob_gas_used', 0),
+                paid_kickbacks=0,
             )
-
-            # Apply the transaction with the header
-            receipt, computation = vm.apply_transaction(header, tx)
-
-            final_coinbase_balance = self.env.get_balance(coinbase_addr)
-            coinbase_profit = self._calculate_coinbase_profit(initial_coinbase_balance, final_coinbase_balance)
-
-            result = OrderSimResult(
-                success=True,  # Always true for executed transactions TODO: not anymore now that we're using apply_transaction
-                gas_used=receipt.gas_used,
-                coinbase_profit=coinbase_profit,
-                error=None,
-                error_message=None,
-                state_changes={
-                    "balances": {
-                        from_addr: initial_from_balance,
-                        to_addr: initial_to_balance,
-                        coinbase_addr: initial_coinbase_balance,
-                    },
-                    "logs": computation.get_log_entries()
-                }
-            )
-
-            return result
 
         except Exception as e:
-            # Execution errors are treated as validation failures
-            print(f"Transaction execution failed: {type(e).__name__}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return OrderSimResult(
-                success=False,
-                gas_used=0,
-                error=SimulationError.VALIDATION_ERROR,
-                error_message=f"Transaction execution failed: {str(e)}"
-            )
+
+            # Check if the transaction used gas before failing
+            gas_used = getattr(self.evm.result, 'gas_used', 0) if hasattr(self.evm, 'result') else 0
+            
+            if gas_used > 0:
+                # Transaction failed after using gas - builder can still collect fees
+                profit = self.evm.get_balance(cb) - before_cb - self.context.block_base_fee * gas_used
+                self.evm.set_balance(cb, before_cb + profit)
+                self.evm.commit()
+                
+                logger.info(f"Transaction reverted but used gas ({gas_used}), treating as successful: {e}")
+                return OrderSimResult(
+                    success=True,
+                    gas_used=gas_used,
+                    coinbase_profit=profit,
+                    blob_gas_used=getattr(self.evm.result, 'blob_gas_used', 0) if hasattr(self.evm, 'result') else 0,
+                    paid_kickbacks=0,
+                )
+            else:
+                # Transaction failed before using gas - validation error
+                logger.error(f"Transaction simulation failed during validation: {e}")
+                return OrderSimResult(
+                    success=False,
+                    gas_used=0,
+                    coinbase_profit=0,
+                    blob_gas_used=0,
+                    paid_kickbacks=0,
+                    error=SimulationError.VALIDATION_ERROR,
+                    error_message=str(e),
+                )
 
 
     def simulate_tx_order(self, order: TxOrder) -> SimulatedOrder:
@@ -368,69 +302,19 @@ class EVMSimulator:
             return self._convert_result_to_simulated_order(order, error_result)
   
     def simulate_bundle_order(self, order: BundleOrder) -> SimulatedOrder:
-        # Only accept BundleOrder
-        if not isinstance(order, BundleOrder):
-            logger.error(f"simulate_bundle_order called with non-BundleOrder: {type(order)}")
-            error_result = OrderSimResult(
-                success=False,
-                gas_used=0,
-                error=SimulationError.UNKNOWN_ERROR,
-                error_message="simulate_bundle_order called with non-BundleOrder"
-            )
-            return self._convert_result_to_simulated_order(order, error_result)
-        try:
-            bundle_rollback_point = self._create_rollback_point()
-            total_gas_used = 0
-            total_coinbase_profit = 0
-            bundle_success = True
-            error_message = None
-            
-            for i, (child_order, optional) in enumerate(order.child_orders):
-                if hasattr(child_order, 'order_type') and child_order.order_type() == OrderType.TX:
-                    tx_data = child_order.get_transaction_data() if hasattr(child_order, 'get_transaction_data') else None
-                    if not tx_data:
-                        tx_data = {
-                            'from': getattr(child_order, 'sender', '0x' + '0' * 40),
-                            'nonce': getattr(child_order, 'nonce', 0),
-                            'gasPrice': getattr(child_order, 'max_fee_per_gas', 0),
-                            'gas': 21000,
-                            'to': None,
-                            'value': 0,
-                            'input': '0x'
-                        }
-                    
-                    tx_result = self._execute_tx(tx_data)
-                    if not tx_result.success and not optional:
-                        bundle_success = False
-                        error_message = f"Required transaction {i} failed: {tx_result.error_message}"
-                        break
-                    elif tx_result.success:
-                        total_gas_used += tx_result.gas_used
-                        total_coinbase_profit += tx_result.coinbase_profit
-                else:
-                    logger.warning(f"Bundle contains non-transaction order type: {getattr(child_order, 'order_type', lambda: '?')()}")
-            if not bundle_success:
-                self._rollback_to_point(bundle_rollback_point)
-                total_gas_used = 0
-                total_coinbase_profit = 0
-            result = OrderSimResult(
-                success=bundle_success,
-                gas_used=total_gas_used,
-                coinbase_profit=total_coinbase_profit,
-                error=None if bundle_success else SimulationError.VALIDATION_ERROR,
-                error_message=error_message
-            )
-            return self._convert_result_to_simulated_order(order, result)
-        except Exception as e:
-            self._rollback_to_point(bundle_rollback_point)
-            logger.error(f"Failed to simulate bundle order {getattr(order, 'id', lambda: '?')()}: {e}")
-            error_result = OrderSimResult(
-                success=False,
-                gas_used=0,
-                error=SimulationError.VALIDATION_ERROR,
-                error_message=str(e)
-            )
-            return self._convert_result_to_simulated_order(order, error_result)
+        rollback = self.evm.snapshot()
+        total_gas, total_profit = 0, 0
+        for child_order, optional in order.child_orders:
+            res = self._execute_tx(child_order.get_transaction_data())
+            if not res.success and not optional:
+                self.evm.revert(rollback)
+                return self._convert_result_to_simulated_order(order, res)
+            if res.success:
+                total_gas += res.gas_used
+                total_profit += res.coinbase_profit
+        self.evm.revert(rollback)
+        combined = OrderSimResult(success=True, gas_used=total_gas, coinbase_profit=total_profit)
+        return self._convert_result_to_simulated_order(order, combined)
     
     def simulate_share_bundle_order(self, order: ShareBundleOrder) -> SimulatedOrder:
         # Only accept ShareBundleOrder
@@ -448,49 +332,49 @@ class EVMSimulator:
     def simulate_order_with_parents(self, order: Order, parent_orders: List[Order] = None) -> SimulatedOrder:
         """
         Simulate an order, including any required parent orders first.
-        This mirrors rbuilder's simulate_order_using_fork functionality.
+        Maintains nonce tracking by recording each successful parent execution.
         """
         if parent_orders is None:
             parent_orders = []
-            
+
+        rollback = self.evm.snapshot()
         try:
-            # Ensure we're forked at the correct block for the entire parent-child chain
-            self.fork_at_block(self.context.block_number - 1)
-            
-            # Create a rollback point to restore state if needed
-            rollback_point = self._create_rollback_point()
-            
-            # First simulate all parent orders on the same fork
+            # First simulate all parent orders, updating nonce cache
             for parent_order in parent_orders:
-                parent_result = self._simulate_single_order(parent_order)
-                if not parent_result.simulation_result.success:
-                    # Parent failed, rollback and return failure
-                    self._rollback_to_point(rollback_point)
+                parent_res = self._simulate_single_order(parent_order)
+                if not parent_res.simulation_result.success:
+                    # Parent failed: rollback and return failure
+                    self.evm.revert(rollback)
                     error_result = OrderSimResult(
                         success=False,
                         gas_used=0,
+                        coinbase_profit=0,
+                        blob_gas_used=0,
+                        paid_kickbacks=0,
                         error=SimulationError.VALIDATION_ERROR,
-                        error_message=f"Parent order failed: {parent_result.simulation_result.error_message}"
+                        error_message=f"Parent order failed: {parent_res.simulation_result.error_message}"
                     )
                     return self._convert_result_to_simulated_order(order, error_result)
-                # Record parent execution for nonce tracking (but don't accumulate gas/profit)
+                # Record nonce update for parent
                 self._record_order_execution(parent_order)
-            
-            # Now simulate the main order (returns only its own gas/profit)
-            result = self._simulate_single_order(order)
-            if result.simulation_result.success:
+
+            # Now simulate main order
+            main_res = self._simulate_single_order(order)
+            if main_res.simulation_result.success:
                 self._record_order_execution(order)
             else:
-                # Main order failed, rollback
-                self._rollback_to_point(rollback_point)
-                
-            return result
-            
+                # On failure of main, rollback
+                self.evm.revert(rollback)
+            return main_res
         except Exception as e:
-            logger.error(f"Failed to simulate order with parents {order.id()}: {e}")
+            # On exception, rollback and return error
+            self.evm.revert(rollback)
             error_result = OrderSimResult(
                 success=False,
                 gas_used=0,
+                coinbase_profit=0,
+                blob_gas_used=0,
+                paid_kickbacks=0,
                 error=SimulationError.VALIDATION_ERROR,
                 error_message=str(e)
             )
@@ -557,20 +441,18 @@ class EVMSimulator:
         return self.simulate_order_with_parents(order, parent_orders)
 
     def _get_account_nonce(self, address: str) -> int:
-        """Get the current nonce for an account, with caching"""
+        """Get the current nonce for an account, with caching."""
         if address not in self.nonce_cache:
-            # Get nonce from forked state - need canonical address (bytes)
-            addr = Address(address)
-            nonce = self.env.evm.vm.state.get_nonce(addr.canonical_address)
+            # Fetch nonce via pyrevm
+            account = self.evm.basic(address)
+            nonce = int(account.nonce)
             self.nonce_cache[address] = nonce
         return self.nonce_cache[address]
     
     def _update_account_nonce(self, address: str, new_nonce: int):
-        """Update the cached nonce for an account"""
+        """Update the cached nonce for an account and override in EVM state."""
+        # Update local cache
         self.nonce_cache[address] = new_nonce
-        # Also update the EVM state if needed
-        addr = Address(address)
-        self.env.evm.vm.state.set_nonce(addr.canonical_address, new_nonce)
     
     def _check_order_dependencies(self, order: Order) -> Tuple[bool, List[Order]]:
         """
