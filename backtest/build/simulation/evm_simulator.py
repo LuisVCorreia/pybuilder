@@ -4,9 +4,12 @@ from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareB
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
-
+from contextlib import redirect_stdout
+import io
 
 from pyrevm import EVM, Env, BlockEnv
+from .state_trace import UsedStateTrace
+from .state_tracer import TracingEVMWrapper, create_tracing_evm
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +96,7 @@ class OrderSimResult:
     error: Optional[SimulationError] = None
     error_message: Optional[str] = None
     state_changes: Optional[Dict[str, Any]] = None
+    state_trace: Optional[UsedStateTrace] = None  # State tracing information
 
 
 @dataclass
@@ -109,7 +113,7 @@ class SimulatedOrder:
     """An order with its simulation results, matching rbuilder's SimulatedOrder"""
     order: Order
     sim_value: SimValue
-    used_state_trace: Optional[Any] = None  # Deferred for now
+    used_state_trace: Optional[UsedStateTrace] = None  # State tracing information
     _error_result: Optional[OrderSimResult] = None  # For failed orders
 
     @property
@@ -125,12 +129,14 @@ class SimulatedOrder:
                 gas_used=self.sim_value.gas_used,
                 coinbase_profit=self.sim_value.coinbase_profit,
                 blob_gas_used=self.sim_value.blob_gas_used,
-                paid_kickbacks=self.sim_value.paid_kickbacks
+                paid_kickbacks=self.sim_value.paid_kickbacks,
+                state_trace=self.used_state_trace
             )
 
 class EVMSimulator:
-    def __init__(self, simulation_context: SimulationContext, rpc_url: str):
+    def __init__(self, simulation_context: SimulationContext, rpc_url: str, enable_tracing: bool = True):
         self.context = simulation_context
+        self.enable_tracing = enable_tracing
         
         block_env = BlockEnv(
             number=simulation_context.block_number,
@@ -144,12 +150,20 @@ class EVMSimulator:
         )
         pyenv = Env(block=block_env)
         
-        # Use regular EVM without tracing
-        self.evm = EVM(
-            fork_url=rpc_url,
-            fork_block=str(simulation_context.block_number - 1),
-            env=pyenv,
-        )
+        if enable_tracing:
+            raw_evm = EVM(
+                fork_url=rpc_url,
+                fork_block=str(simulation_context.block_number - 1),
+                env=pyenv,
+                tracing=False,  # Enable tracing in pyrevm
+            )
+            self.evm = TracingEVMWrapper(raw_evm, auto_trace=False)  # Manual trace control
+        else:
+            self.evm = EVM(
+                fork_url=rpc_url,
+                fork_block=str(simulation_context.block_number - 1),
+                env=pyenv,
+            )
             
         # Track nonces and simulated orders
         self.nonce_cache: Dict[str, int] = {}
@@ -200,7 +214,6 @@ class EVMSimulator:
         gas_price = self._safe_to_int(tx_data["gasPrice"])
         data = self._safe_to_bytes(tx_data["input"])
 
-
         if tx_type_int == 2:  # EIP-1559 transaction
             max_fee_per_gas = self._safe_to_int(tx_data["maxFeePerGas"])
             max_priority_fee_per_gas = self._safe_to_int(tx_data["maxPriorityFeePerGas"])
@@ -225,8 +238,16 @@ class EVMSimulator:
         }
 
         try:
-
-            self.evm.message_call(**msg_args)
+            if self.enable_tracing:
+                # Redirect stdout to suppress trace prints
+                with redirect_stdout(io.StringIO()):
+                    self.evm.message_call(**msg_args)
+            else:
+                self.evm.message_call(**msg_args)
+            
+            # Capture state trace if enabled
+            if self.enable_tracing and hasattr(self.evm, 'finish_tracing'):
+                state_trace = self.evm.finish_tracing()
             
             profit = self.evm.get_balance(cb) - before_cb - self.context.block_base_fee * self.evm.result.gas_used
             self.evm.set_balance(cb, before_cb + profit)
@@ -238,10 +259,20 @@ class EVMSimulator:
                 coinbase_profit=profit,
                 blob_gas_used=getattr(self.evm.result, 'blob_gas_used', 0),
                 paid_kickbacks=0,
+                error=None,
+                error_message=None,
+                state_changes=None,
+                state_trace=state_trace
             )
 
         except Exception as e:
-
+            # Finish tracing even on error
+            if self.enable_tracing and hasattr(self.evm, 'finish_tracing'):
+                try:
+                    state_trace = self.evm.finish_tracing()
+                except:
+                    state_trace = None
+            
             # Check if the transaction used gas before failing
             gas_used = getattr(self.evm.result, 'gas_used', 0) if hasattr(self.evm, 'result') else 0
             
@@ -258,6 +289,10 @@ class EVMSimulator:
                     coinbase_profit=profit,
                     blob_gas_used=getattr(self.evm.result, 'blob_gas_used', 0) if hasattr(self.evm, 'result') else 0,
                     paid_kickbacks=0,
+                    error=None,
+                    error_message=None,
+                    state_changes=None,
+                    state_trace=state_trace
                 )
             else:
                 # Transaction failed before using gas - validation error
@@ -270,6 +305,7 @@ class EVMSimulator:
                     paid_kickbacks=0,
                     error=SimulationError.VALIDATION_ERROR,
                     error_message=str(e),
+                    state_trace=state_trace
                 )
 
 
@@ -520,7 +556,7 @@ class EVMSimulator:
             return SimulatedOrder(
                 order=order,
                 sim_value=sim_value,
-                used_state_trace=None  # TODO: Add state tracing
+                used_state_trace=result.state_trace  # Include state trace
             )
         else:
             # For failed orders, create a SimulatedOrder with zero values
@@ -533,7 +569,7 @@ class EVMSimulator:
             simulated_order = SimulatedOrder(
                 order=order,
                 sim_value=sim_value,
-                used_state_trace=None
+                used_state_trace=result.state_trace  # Include state trace even for failed orders
             )
             # Store error info for backwards compatibility
             simulated_order._error_result = result
@@ -543,7 +579,7 @@ class EVMSimulator:
         """Calculate coinbase profit from balance change"""
         return max(0, final_balance - initial_balance)
 
-def simulate_orders(orders: List[Order], block_data: BlockData, rpc_url: str) -> List[SimulatedOrder]:
+def simulate_orders(orders: List[Order], block_data: BlockData, rpc_url: str, enable_tracing: bool = True) -> List[SimulatedOrder]:
     """
     Simulate orders using onchain block data for proper context.
     Implements order dependency resolution similar to rbuilder's SimTree.
@@ -552,6 +588,7 @@ def simulate_orders(orders: List[Order], block_data: BlockData, rpc_url: str) ->
         orders: List of orders to simulate
         block_data: Block data containing onchain block and winning bid trace
         rpc_url: RPC URL for EVM simulation
+        enable_tracing: Whether to enable state tracing
         
     Returns:
         List of simulated orders with results
@@ -561,8 +598,11 @@ def simulate_orders(orders: List[Order], block_data: BlockData, rpc_url: str) ->
         logger.info(f"Simulating {len(orders)} orders for block {context.block_number}")
         logger.info(f"Using onchain block data: hash={context.block_hash}")
 
-        simulator = EVMSimulator(context, rpc_url)
-        logger.info(f"Using EVM-based simulation with onchain block context (parent state root)")
+        simulator = EVMSimulator(context, rpc_url, enable_tracing=enable_tracing)
+        if enable_tracing:
+            logger.info(f"Using EVM-based simulation with state tracing enabled")
+        else:
+            logger.info(f"Using EVM-based simulation without state tracing")
         
         results = []
         
