@@ -101,6 +101,8 @@ class EVMSimulator_pyEVM:
 
     def _safe_to_int(self, value: int | str | bytes) -> int:
         """Convert a value to int, handling hex strings, integers, and bytes."""
+        if not value:
+            return 0
         if isinstance(value, int):
             return value
         if isinstance(value, bytes):
@@ -177,7 +179,7 @@ class EVMSimulator_pyEVM:
         value = self._safe_to_int(tx_data["value"])
         gas = self._safe_to_int(tx_data["gas"])
         gas_price = self._safe_to_int(tx_data["gasPrice"])
-        data = self._safe_to_bytes(tx_data["input"])
+        data = self._safe_to_bytes(tx_data["data"])
         access_list = tx_data.get("accessList", [])
         nonce = self._safe_to_int(tx_data["nonce"])
         max_fee_per_blob_gas = None
@@ -188,12 +190,12 @@ class EVMSimulator_pyEVM:
         s = self._safe_to_int(tx_data.get("s"))
 
         if tx_type_int == 2:  # EIP-1559 transaction
-            y_parity = self._safe_to_int(tx_data["yParity"])
-            max_fee_per_gas = self._safe_to_int(tx_data["maxFeePerGas"])
-            max_priority_fee_per_gas = self._safe_to_int(tx_data["maxPriorityFeePerGas"])
+            y_parity = self._safe_to_int(tx_data["y_parity"])
+            max_fee_per_gas = self._safe_to_int(tx_data["max_fee_per_gas"])
+            max_priority_fee_per_gas = self._safe_to_int(tx_data["max_priority_fee_per_gas"])
         elif tx_type_int == 3:
-            max_fee_per_blob_gas = self._safe_to_int(tx_data.get("maxFeePerBlobGas"))
-            blob_hashes = tx_data.get("blobHashes")
+            max_fee_per_blob_gas = self._safe_to_int(tx_data.get("max_fee_per_blob_gas"))
+            blob_hashes = tx_data.get("blob_versioned_hashes")
 
         try:
             if tx_type_int == 2:         
@@ -208,7 +210,7 @@ class EVMSimulator_pyEVM:
                     value=value,
                     data=data,
                     access_list=access_list,
-                    y_parity=v,
+                    y_parity=y_parity,
                     r=r,
                     s=s,
                 )
@@ -362,11 +364,7 @@ class EVMSimulator_pyEVM:
             )
             return self._convert_result_to_simulated_order(order, error_result)
         try:
-            # tx_data = order.get_transaction_data()
-            import web3
-            web3 = web3.Web3(web3.Web3.HTTPProvider(self.rpc_url))
-            tx_data = web3.eth.get_transaction(order.id().value)
-
+            tx_data = order.get_transaction_data()
             result = self._execute_tx(tx_data)
             logger.info(f"Simulation result: {result.success}, gas used: {result.gas_used}, coinbase profit: {result.coinbase_profit}")
             return self._convert_result_to_simulated_order(order, result)

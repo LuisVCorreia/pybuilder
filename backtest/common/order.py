@@ -19,14 +19,9 @@ logger = logging.getLogger(__name__)
 def safe_int_from_field(field) -> int:
     """Safely convert RLP field to int, handling bytes and int."""
     if isinstance(field, bytes):
-        if not field:
-            return 0
-        return int.from_bytes(field, 'big')
-    
+        return int.from_bytes(field, 'big') if field else 0
     if isinstance(field, int):
         return field
-
-    # If we get here, something is wrong. Log it and return 0 to be safe.
     logger.warning(f"safe_int_from_field received unexpected type: {type(field)}, value: {field}")
     return 0
 
@@ -162,15 +157,25 @@ class Order:
 
 
 class TxOrder(Order):
-    def __init__(self, timestamp_ms: int, raw_tx: bytes, max_fee_per_gas: int, nonce: int, sender: str, to: Optional[str], canonical_tx: Optional[bytes] = None, signature_fields: Optional[dict] = None):
+    """
+    Represents a single transaction order.
+
+    The raw transaction is decoded once upon creation, and the structured
+    data is stored for efficient access.
+    """
+    def __init__(self, timestamp_ms: int, raw_tx: bytes, tx_data: Dict[str, Any], canonical_tx: Optional[bytes] = None):
         self.timestamp_ms = timestamp_ms
         self.raw_tx = raw_tx
-        self.max_fee_per_gas = max_fee_per_gas
-        self.nonce = nonce
-        self.sender = sender
-        self.to = to
+        # Store the fully decoded transaction data
+        self.tx_data = tx_data
+        # The transaction payload used for hashing and signature recovery
         self.canonical_tx = canonical_tx if canonical_tx is not None else raw_tx
-        self.signature_fields: Optional[dict] = signature_fields
+
+        # For convenience and backward compatibility within the class
+        self.sender = self.tx_data['from']
+        self.to = self.tx_data.get('to')
+        self.nonce = self.tx_data['nonce']
+        self.max_fee_per_gas = self.tx_data.get('maxFeePerGas', self.tx_data.get('gasPrice', 0))
 
     def id(self) -> OrderId:
         txhash = keccak(self.canonical_tx)
@@ -189,291 +194,112 @@ class TxOrder(Order):
     @classmethod
     def from_raw(cls, timestamp_ms: int, raw_tx: bytes) -> 'TxOrder':
         """
-        Decode the raw signed RLP once to extract:
-         - max_fee_per_gas
-         - nonce
-         - sender (via signature recovery)
-         - signature fields (v/y_parity, r, s)
+        Decodes a raw transaction ONCE, extracts all relevant fields with their
+        correct data types (bytes, int, list), recovers the sender, and
+        creates a TxOrder instance ready for EVM simulation.
         """
+        if not raw_tx:
+            raise ValueError("Empty transaction data")
+
         try:
-            if not raw_tx:
-                raise ValueError("Empty transaction data")
-
+            tx_data: Dict[str, Any] = {}
+            canonical_tx = raw_tx
             first_byte = raw_tx[0]
-            tx_type = None
-            sender = None
-            canonical_tx = raw_tx  # Default to raw_tx, override for blob txs
-            signature_fields: Optional[dict] = None
-            to = None
 
-            if first_byte <= 0x7f:  # Typed transaction
+            if first_byte <= 0x7f:  # Typed Transaction
                 tx_type = first_byte
                 payload = raw_tx[1:]
-                if not payload:
-                    raise ValueError(f"Empty payload for typed transaction {tx_type}")
                 decoded_payload = rlp.decode(payload)
-                if not isinstance(decoded_payload, list):
-                    raise ValueError("Transaction payload must be a list")
 
-                if tx_type == 0x03:  # EIP-4844 Blob Transaction
-                    if len(decoded_payload) < 1:
-                        raise ValueError("Invalid EIP-4844 payload structure")
-                    tx_payload_body = decoded_payload[0]
-                    if not isinstance(tx_payload_body, list):
-                        raise ValueError("EIP-4844 transaction body must be a list of fields")
-                    fields = tx_payload_body
-                    if len(fields) < 12:
-                        raise ValueError(f"EIP-4844 tx body needs at least 12 fields, got {len(fields)}")
-                    nonce = safe_int_from_field(fields[1])
-                    max_fee = safe_int_from_field(fields[3])
-                    y_parity = safe_int_from_field(fields[9])
-                    r = safe_int_from_field(fields[10])
-                    s = safe_int_from_field(fields[11])
-                    signature_fields = {'y_parity': y_parity, 'r': r, 's': s}
-                    to = fields[5].hex() if fields[5] else None
-                    if to and not to.startswith('0x'):
-                        to = '0x' + to
-                    try:
-                        canonical_tx_encoded = rlp.encode(tx_payload_body)
-                        canonical_tx = raw_tx[0:1] + canonical_tx_encoded
-                        sender = Account.recover_transaction(canonical_tx)
-                    except Exception as e:
-                        raise ValueError(f"Failed to recover sender from canonical blob tx: {e}")
-                else: # Other typed transactions (EIP-2930, EIP-1559, etc.)
+                if tx_type == 0x01: # EIP-2930
                     fields = decoded_payload
-                    if tx_type == 0x01:  # EIP-2930
-                        if len(fields) < 11:
-                            raise ValueError(f"EIP-2930 tx needs at least 11 fields, got {len(fields)}")
-                        nonce = safe_int_from_field(fields[1])
-                        max_fee = safe_int_from_field(fields[2]) # gasPrice
-                        y_parity = safe_int_from_field(fields[8])
-                        r = safe_int_from_field(fields[9])
-                        s = safe_int_from_field(fields[10])
-                        signature_fields = {'y_parity': y_parity, 'r': r, 's': s}
-                        to = fields[4].hex() if fields[4] else None
-                        if to and not to.startswith('0x'):
-                            to = '0x' + to
-                    elif tx_type == 0x02:  # EIP-1559
-                        if len(fields) < 12:
-                            raise ValueError(f"EIP-1559 tx needs at least 12 fields, got {len(fields)}")
-                        nonce = safe_int_from_field(fields[1])
-                        max_fee = safe_int_from_field(fields[3]) # maxFeePerGas
-                        y_parity = safe_int_from_field(fields[9])
-                        r = safe_int_from_field(fields[10])
-                        s = safe_int_from_field(fields[11])
-                        signature_fields = {'y_parity': y_parity, 'r': r, 's': s}
-                        to = fields[5].hex() if fields[5] else None
-                        if to and not to.startswith('0x'):
-                            to = '0x' + to
-                    elif tx_type == 0x04: # EIP-7702
-                        if len(fields) < 12:
-                            raise ValueError(f"EIP-7702 tx needs at least 12 fields, got {len(fields)}")
-                        nonce = safe_int_from_field(fields[1])
-                        max_fee = safe_int_from_field(fields[3]) # maxFeePerGas
-                        y_parity = safe_int_from_field(fields[9])
-                        r = safe_int_from_field(fields[10])
-                        s = safe_int_from_field(fields[11])
-                        signature_fields = {'y_parity': y_parity, 'r': r, 's': s}
-                        to = fields[5].hex() if fields[5] else None
-                        if to and not to.startswith('0x'):
-                            to = '0x' + to
-                    else: # Other or unknown typed tx
-                        if len(fields) < 3:
-                            raise ValueError(f"Unsupported typed tx {tx_type} with {len(fields)} fields")
-                        nonce = safe_int_from_field(fields[1])
-                        max_fee = 0 # Unknown, default to 0
-                        # Try to extract last 3 fields as signature
-                        if len(fields) >= 3:
-                            y_parity = safe_int_from_field(fields[-3])
-                            r = safe_int_from_field(fields[-2])
-                            s = safe_int_from_field(fields[-1])
-                            signature_fields = {'y_parity': y_parity, 'r': r, 's': s}
-                        to = fields[4].hex() if len(fields) > 4 and fields[4] else None
-                        if to and not to.startswith('0x'):
-                            to = '0x' + to
-                    sender = Account.recover_transaction(raw_tx)
-            else:  # Legacy transaction
+                    tx_data = {
+                        'type': tx_type, 'chainId': safe_int_from_field(fields[0]),
+                        'nonce': safe_int_from_field(fields[1]), 'gasPrice': safe_int_from_field(fields[2]),
+                        'gas': safe_int_from_field(fields[3]), 'to': fields[4] if fields[4] else b'',
+                        'value': safe_int_from_field(fields[5]), 'data': fields[6],
+                        'access_list': fields[7], 'v': safe_int_from_field(fields[8]),
+                        'r': safe_int_from_field(fields[9]), 's': safe_int_from_field(fields[10]),
+                    }
+                elif tx_type == 0x02: # EIP-1559
+                    fields = decoded_payload
+                    tx_data = {
+                        'type': tx_type, 'chainId': safe_int_from_field(fields[0]),
+                        'nonce': safe_int_from_field(fields[1]), 'max_priority_fee_per_gas': safe_int_from_field(fields[2]),
+                        'max_fee_per_gas': safe_int_from_field(fields[3]), 'gas': safe_int_from_field(fields[4]),
+                        'to': fields[5] if fields[5] else b'', 'value': safe_int_from_field(fields[6]),
+                        'data': fields[7], 'access_list': fields[8],
+                        'y_parity': safe_int_from_field(fields[9]), 'r': safe_int_from_field(fields[10]),
+                        's': safe_int_from_field(fields[11]),
+                        # Add gasPrice for compatibility, set to the max fee cap.
+                        'gasPrice': safe_int_from_field(fields[3]),
+                    }
+                elif tx_type == 0x03: # EIP-4844 Blob Transaction
+                    tx_body = decoded_payload[0]
+                    canonical_tx = tx_type.to_bytes(1, 'big') + rlp.encode(tx_body)
+                    tx_data = {
+                        'type': tx_type, 'chainId': safe_int_from_field(tx_body[0]),
+                        'nonce': safe_int_from_field(tx_body[1]), 'max_priority_fee_per_gas': safe_int_from_field(tx_body[2]),
+                        'max_fee_per_gas': safe_int_from_field(tx_body[3]), 'gas': safe_int_from_field(tx_body[4]),
+                        'to': tx_body[5] if tx_body[5] else b'', 'value': safe_int_from_field(tx_body[6]),
+                        'data': tx_body[7], 'access_list': tx_body[8],
+                        'max_fee_per_blob_gas': safe_int_from_field(tx_body[9]),
+                        'blob_versioned_hashes': tx_body[10],
+                        'y_parity': safe_int_from_field(tx_body[11]), 'r': safe_int_from_field(tx_body[12]),
+                        's': safe_int_from_field(tx_body[13]),
+                        # Add gasPrice for compatibility, set to the max fee cap.
+                        'gasPrice': safe_int_from_field(tx_body[3]),
+                    }
+                else:
+                    raise ValueError(f"Unsupported transaction type: {tx_type}")
+
+            else:  # Legacy Transaction
                 fields = rlp.decode(raw_tx)
-                if not isinstance(fields, list) or len(fields) < 9:
-                    raise ValueError(f"Legacy transaction needs at least 9 fields, got {len(fields)}")
-                nonce = safe_int_from_field(fields[0])
-                max_fee = safe_int_from_field(fields[1]) # gasPrice
-                v = safe_int_from_field(fields[6])
-                r = safe_int_from_field(fields[7])
-                s = safe_int_from_field(fields[8])
-                signature_fields = {'v': v, 'r': r, 's': s}
-                to = fields[3].hex() if fields[3] else None
-                if to and not to.startswith('0x'):
-                    to = '0x' + to
-                sender = Account.recover_transaction(raw_tx)
-            if not sender or sender == "0x0000000000000000000000000000000000000000":
-                raise ValueError("Failed to recover valid sender address")
-            return cls(timestamp_ms, raw_tx, max_fee, nonce, sender, to, canonical_tx, signature_fields)
+                tx_data = {
+                    'type': 0, 'nonce': safe_int_from_field(fields[0]),
+                    'gasPrice': safe_int_from_field(fields[1]), # Use 'gasPrice' for consistency
+                    'gas': safe_int_from_field(fields[2]), 'to': fields[3] if fields[3] else b'',
+                    'value': safe_int_from_field(fields[4]), 'data': fields[5],
+                    'v': safe_int_from_field(fields[6]), 'r': safe_int_from_field(fields[7]),
+                    's': safe_int_from_field(fields[8]),
+                }
+
+            # Recover sender and add to tx_data
+            sender = Account.recover_transaction(canonical_tx)
+            tx_data['from'] = sender
+
+            return cls(timestamp_ms, raw_tx, tx_data, canonical_tx)
+
         except (ValueError, TypeError, IndexError, DecodingError) as e:
             raise ValueError(f"Failed to parse raw tx: {e}")
         except Exception as e:
-            raise ValueError(f"Failed to parse raw tx: {e}")
-    
+            logger.error(f"Unexpected error parsing raw tx: {e}")
+            raise ValueError(f"Unexpected error parsing raw tx: {e}")
+
     def can_execute_with_block_base_fee(self, block_base_fee: int) -> bool:
+        """Checks if the transaction's fee cap is sufficient for the block's base fee."""
         return self.max_fee_per_gas >= block_base_fee
 
     def nonces(self) -> List[TxNonce]:
-        """Return list of nonces this order depends on."""
+        """Returns the nonce this transaction depends on."""
         return [TxNonce(address=self.sender, nonce=self.nonce, optional=False)]
 
     def transactions(self) -> List[Dict[str, Any]]:
-        """Return list of transactions in this order (just one for TxOrder)."""
-        tx_hash = keccak(self.canonical_tx)
+        """Returns a list containing this transaction's summary."""
+        tx_hash = self.id().value
         return [{
-            'hash': f"0x{tx_hash.hex()}",
+            'hash': tx_hash,
             'from': self.sender,
             'to': self.to,
             'nonce': self.nonce,
             'raw_tx': f"0x{self.raw_tx.hex()}"
         }]
 
-    def get_transaction_data(self) -> Optional[Dict[str, Any]]:
+    def get_transaction_data(self) -> Dict[str, Any]:
         """
-        Decode and return transaction data as a dictionary for EVM simulation.
-        Returns transaction fields needed for execution.
+        Returns the pre-decoded transaction data dictionary for EVM simulation.
         """
-        try:
-            if not self.raw_tx:
-                return None
-            first_byte = self.raw_tx[0]
-            tx_data = None
-            if first_byte <= 0x7f:
-                tx_type = first_byte
-                payload = self.raw_tx[1:]
-                if not payload:
-                    return None
-                
-                decoded_payload = rlp.decode(payload)
-                if not isinstance(decoded_payload, list):
-                    return None
-
-                if tx_type == 0x03:  # EIP-4844 Blob Transaction
-                    if len(decoded_payload) < 1:
-                        return None
-                    
-                    fields = decoded_payload[0]
-                    if not isinstance(fields, list) or len(fields) < 9:
-                        return None
-                    
-                    tx_data = {
-                        'type': tx_type,
-                        'chainId': safe_int_from_field(fields[0]),
-                        'nonce': safe_int_from_field(fields[1]),
-                        'maxPriorityFeePerGas': safe_int_from_field(fields[2]),
-                        'maxFeePerGas': safe_int_from_field(fields[3]),
-                        'gas': safe_int_from_field(fields[4]),
-                        'to': fields[5].hex() if fields[5] else None,
-                        'value': safe_int_from_field(fields[6]),
-                        'input': fields[7].hex() if fields[7] else '0x',
-                        'from': self.sender,
-                        'gasPrice': safe_int_from_field(fields[3]),  # Use maxFeePerGas as gasPrice
-                    }
-                    
-                    # Add signature fields if available
-                    if self.signature_fields is not None:
-                        tx_data['y_parity'] = self.signature_fields.get('y_parity')
-                        tx_data['r'] = self.signature_fields.get('r')
-                        tx_data['s'] = self.signature_fields.get('s')
-                elif tx_type == 0x02:  # EIP-1559
-                    fields = decoded_payload
-                    if len(fields) < 9:
-                        return None
-                    
-                    tx_data = {
-                        'type': tx_type,
-                        'chainId': safe_int_from_field(fields[0]),
-                        'nonce': safe_int_from_field(fields[1]),
-                        'maxPriorityFeePerGas': safe_int_from_field(fields[2]),
-                        'maxFeePerGas': safe_int_from_field(fields[3]),
-                        'gas': safe_int_from_field(fields[4]),
-                        'to': fields[5].hex() if fields[5] else None,
-                        'value': safe_int_from_field(fields[6]),
-                        'input': fields[7].hex() if fields[7] else '0x',
-                        'from': self.sender,
-                        'gasPrice': safe_int_from_field(fields[3]),  # Use maxFeePerGas as gasPrice
-                    }
-                    
-                    # Add signature fields if available
-                    if self.signature_fields is not None:
-                        tx_data['y_parity'] = self.signature_fields.get('y_parity')
-                        tx_data['r'] = self.signature_fields.get('r')
-                        tx_data['s'] = self.signature_fields.get('s')
-                elif tx_type == 0x01:  # EIP-2930
-                    fields = decoded_payload
-                    if len(fields) < 8:
-                        return None
-                        
-                    tx_data = {
-                        'type': tx_type,
-                        'chainId': safe_int_from_field(fields[0]),
-                        'nonce': safe_int_from_field(fields[1]),
-                        'gasPrice': safe_int_from_field(fields[2]),
-                        'gas': safe_int_from_field(fields[3]),
-                        'to': fields[4].hex() if fields[4] else None,
-                        'value': safe_int_from_field(fields[5]),
-                        'input': fields[6].hex() if fields[6] else '0x',
-                        'from': self.sender,
-                    }
-                    
-                    # Add signature fields if available
-                    if self.signature_fields is not None:
-                        tx_data['v'] = self.signature_fields.get('v')
-                        tx_data['r'] = self.signature_fields.get('r')
-                        tx_data['s'] = self.signature_fields.get('s')
-                else:
-                    # Unknown typed transaction, try to parse basic fields
-                    fields = decoded_payload
-                    if len(fields) < 3:
-                        return None
-                    
-                    tx_data = {
-                        'type': tx_type,
-                        'nonce': safe_int_from_field(fields[1]) if len(fields) > 1 else 0,
-                        'gasPrice': safe_int_from_field(fields[2]) if len(fields) > 2 else 0,
-                        'gas': safe_int_from_field(fields[3]) if len(fields) > 3 else 21000,
-                        'to': fields[4].hex() if len(fields) > 4 and fields[4] else None,
-                        'value': safe_int_from_field(fields[5]) if len(fields) > 5 else 0,
-                        'input': fields[6].hex() if len(fields) > 6 and fields[6] else '0x',
-                        'from': self.sender,
-                    }
-                    
-                    # Add signature fields if available
-                    if self.signature_fields is not None:
-                        tx_data['y_parity'] = self.signature_fields.get('y_parity')
-                        tx_data['r'] = self.signature_fields.get('r')
-                        tx_data['s'] = self.signature_fields.get('s')
-            else:  # Legacy transaction
-                fields = rlp.decode(self.raw_tx)
-                if not isinstance(fields, list) or len(fields) < 6:
-                    return None
-                
-                tx_data = {
-                    'type': 0,  # Legacy
-                    'nonce': safe_int_from_field(fields[0]),
-                    'gasPrice': safe_int_from_field(fields[1]),
-                    'gas': safe_int_from_field(fields[2]),
-                    'to': fields[3].hex() if fields[3] else None,
-                    'value': safe_int_from_field(fields[4]),
-                    'input': fields[5].hex() if fields[5] else '0x',
-                    'from': self.sender,
-                }
-                
-                # Add signature fields if available
-                if self.signature_fields is not None:
-                    tx_data['v'] = self.signature_fields.get('v')
-                    tx_data['r'] = self.signature_fields.get('r')
-                    tx_data['s'] = self.signature_fields.get('s')
-
-            return tx_data
-        except Exception as e:
-            logger.warning(f"Failed to decode transaction data: {e}")
-            return None
-
+        return self.tx_data
 
 def _can_execute_list_txs(
     list_txs: List[Tuple['Order', bool]],

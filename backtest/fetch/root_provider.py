@@ -26,3 +26,4 @@ class RootProvider:
             return dict(block)
         except Exception as e:
             raise ValueError(f"Failed to fetch block {block_number}: {e}")
+
