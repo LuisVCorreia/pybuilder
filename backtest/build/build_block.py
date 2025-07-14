@@ -71,7 +71,6 @@ def run_backtest(args, config):
     logger.info(f"Failed simulations: {len(failed_sims)}")
 
     if successful_sims:
-        # Use sim_value for successful orders (preferred way)
         total_profit = sum(sim.sim_value.coinbase_profit for sim in successful_sims)
         total_gas = sum(sim.sim_value.gas_used for sim in successful_sims)
         total_blob_gas = sum(sim.sim_value.blob_gas_used for sim in successful_sims)
@@ -92,7 +91,14 @@ def run_backtest(args, config):
             error_msg = sim.simulation_result.error_message or "No error message"
             logger.info(f"  Order {sim.order.id()}: {error_info} - {error_msg}")
 
+    # Write sim results to file for debugging
+    with open("pybuilder_sim.txt", "w") as f:
+        for sim in simulated_orders:
+            f.write(f"{sim.order.id()}: {sim.simulation_result.gas_used}, {sim.simulation_result.coinbase_profit}\n")
+
     # Placeholder for builder logic
     logger.info("Running builders...")
+
+    
     # best_bid = run_builders(simulated_orders, config, args.builders)
     # logger.info(f"Block building complete. Best bid: {best_bid}")
