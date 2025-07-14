@@ -1,7 +1,7 @@
 import logging
 import os
 from backtest.common.store import HistoricalDataStorage
-from backtest.build.simulation.evm_simulator import simulate_orders
+from backtest.build.simulation.evm_simulator import simulate_orders, EVMSimulator_pyEVM
 from backtest.build.builders.ordering_builder import run_builders
 from backtest.build.builders.block_result import BuilderComparison
 from backtest.build.simulation.sim_utils import SimulationContext
@@ -66,8 +66,11 @@ def run_backtest(args, config):
         order_source.block_data.winning_bid_trace
     )
 
+    logger.info("Creating EVM simulator...")
+    evm_simulator = EVMSimulator_pyEVM(context, rpc_url)
+
     logger.info("Simulating orders...")
-    simulated_orders = simulate_orders(order_objects, rpc_url, context)
+    simulated_orders = simulate_orders(order_objects, evm_simulator)
     logger.info(f"Simulation complete. Got {len(simulated_orders)} simulated orders.")
     
     # Print simulation results
@@ -122,7 +125,7 @@ def run_backtest(args, config):
     logger.info(f"Running builders: {builder_names}")
     
     # Run all builders
-    results = run_builders(successful_sims, config, builder_names, context)
+    results = run_builders(successful_sims, config, builder_names, evm_simulator)
     
     # Display comparison
     BuilderComparison.print_comparison(results)

@@ -82,7 +82,9 @@ class EVMSimulator_pyEVM:
 
         self.env.evm.vm.state.execution_context._base_fee_per_gas = self._safe_to_int(self.context.block_base_fee)
         self.env.evm.vm.state.execution_context._mix_hash = self._safe_to_bytes(self.context.mix_hash)
-        self.env.evm.vm.state.execution_context._excess_blob_gas = self._safe_to_bytes(self.context.excess_blob_gas)
+        
+        if self.context.excess_blob_gas is not None:
+            self.env.evm.vm.state.execution_context._excess_blob_gas = self._safe_to_int(self.context.excess_blob_gas)
         
         # Set recent block hashes for BLOCKHASH opcode support
         self.env.evm.vm.state.execution_context._prev_hashes = self.recent_block_hashes
@@ -113,7 +115,9 @@ class EVMSimulator_pyEVM:
 
     def _safe_to_bytes(self, value) -> bytes:
         """Convert a value to bytes, handling both hex strings and bytes."""
-        if isinstance(value, bytes):
+        if value is None:
+            return b''  # Return empty bytes for None values
+        elif isinstance(value, bytes):
             return value
         elif isinstance(value, str):
             # Handle string representation of bytes
@@ -534,12 +538,27 @@ class EVMSimulator_pyEVM:
         """Calculate coinbase profit from balance change"""
         return max(0, final_balance - initial_balance)
 
-def simulate_orders(orders: List[Order], rpc_url: str, context: SimulationContext) -> List[SimulatedOrder]:
+    def simulate_and_commit_order(self, order: Order) -> SimulatedOrder:
+        """
+        Simulate an order in the current EVM state and commit the result.
+        Returns the simulation result with in-block context.
+        """
+        return self._simulate_single_order(order)
+
+def simulate_orders(orders: List[Order], simulator: EVMSimulator_pyEVM) -> List[SimulatedOrder]:
+    """
+    Simulate orders using the provided EVM simulator instance.
+    
+    Args:
+        orders: List of orders to simulate
+        simulator: EVM simulator instance to use for simulation
+        
+    Returns:
+        List of simulated orders
+    """
     try:
-        simulator = EVMSimulator_pyEVM(context, rpc_url)
 
         # 1. Get initial on-chain nonces once.
-        # on_chain_nonces = {addr: simulator.evm.basic(addr).nonce for order in orders for addr in {n.address for n in order.nonces()}}
         on_chain_nonces = {addr: simulator.env.evm.vm.state.get_nonce(Address(addr).canonical_address) for order in orders for addr in {n.address for n in order.nonces()}}
 
         sim_tree = SimTree(on_chain_nonces)
@@ -586,7 +605,7 @@ def simulate_orders(orders: List[Order], rpc_url: str, context: SimulationContex
         # Log summary
         successful = sum(1 for r in sim_results_final if r.simulation_result.success)
         failed = len(sim_results_final) - successful
-        logger.info(f"Block {context.block_number} simulation completed: {successful} successful, {failed} failed")
+        logger.info(f"Block {simulator.context.block_number} simulation completed: {successful} successful, {failed} failed")
 
         return sim_results_final
 

@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import List, Dict, Set, Optional, Any, Callable
 from collections import defaultdict
 
-from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue, SimulationContext
+from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue
+from backtest.build.simulation.evm_simulator import EVMSimulator_pyEVM
 from backtest.common.order import OrderId, TxNonce
 from .order_priority import (
     Sorting, 
@@ -67,9 +68,10 @@ class BlockBuildingHelper:
     - Nonce state updates
     """
     
-    def __init__(self, context: SimulationContext, builder_name: str):
-        self.context = context
+    def __init__(self, builder_name: str, simulator: EVMSimulator_pyEVM):
+        self.context = simulator.context
         self.builder_name = builder_name
+        self.simulator = simulator  # Now required, not optional
         self.gas_used = 0
         self.coinbase_profit = 0
         self.blob_gas_used = 0
@@ -86,11 +88,7 @@ class BlockBuildingHelper:
     def commit_order(self, order: SimulatedOrder, 
                     profit_validator: Callable[[SimValue, SimValue], None]) -> Dict[str, Any]:
         """
-        Attempt to commit an order to the block.
-        
-        This is the core order execution logic that mirrors rbuilder's 
-        commit_order functionality. In a real implementation, this would
-        re-execute the order in the current block context.
+        Attempt to commit an order to the block using in-block EVM simulation.
         
         Args:
             order: The order to commit
@@ -100,14 +98,25 @@ class BlockBuildingHelper:
             Dictionary with execution results
         """
         try:
-            # In backtesting, we assume the simulation is accurate
-            # In live building, this would re-execute the order with current state
-            simulated_profit = order.sim_value.coinbase_profit
-            simulated_gas = order.sim_value.gas_used
-            simulated_blob_gas = order.sim_value.blob_gas_used
-            simulated_kickbacks = order.sim_value.paid_kickbacks
+            # Always use in-block simulation - re-execute the order in current EVM state
+            logger.debug(f"Re-executing order {order.order.id()} in block context")
+            in_block_result = self.simulator.simulate_and_commit_order(order.order)
             
-            # Create new simulation value (in live, this would be the re-execution result)
+            if not in_block_result.simulation_result.success:
+                raise ExecutionError(
+                    f"Order failed in-block execution: {in_block_result.simulation_result.error_message}",
+                    "in_block_execution_failed"
+                )
+            
+            # Use in-block simulation results
+            simulated_profit = in_block_result.simulation_result.coinbase_profit
+            simulated_gas = in_block_result.simulation_result.gas_used
+            simulated_blob_gas = in_block_result.simulation_result.blob_gas_used
+            simulated_kickbacks = in_block_result.simulation_result.paid_kickbacks
+            
+            logger.debug(f"In-block execution results for {order.order.id()}: "
+                       f"gas={simulated_gas}, profit={simulated_profit}")
+            
             new_sim_value = SimValue(
                 coinbase_profit=simulated_profit,
                 gas_used=simulated_gas,
@@ -201,16 +210,16 @@ class OrderingBuilder:
         logger.info(f"Created {name} with sorting: {config.sorting.value}")
     
     def build_block(
-        self, 
+        self,
         simulated_orders: List[SimulatedOrder], 
-        context: SimulationContext
+        evm_simulator: EVMSimulator_pyEVM
     ) -> BlockResult:
         """
-        Build a block using the ordering algorithm.
+        Build a block using the ordering algorithm with in-block EVM simulation.
 
         Args:
             simulated_orders: List of successfully simulated orders
-            context: Block building context with block parameters
+            evm_simulator: EVM simulator instance for in-block execution
             
         Returns:
             Block building result with included orders and metrics
@@ -234,8 +243,12 @@ class OrderingBuilder:
                 f"({len(simulated_orders) - len(valid_orders)} filtered) using {self.name}"
             )
             
-            # Initialize block building helper
-            helper = BlockBuildingHelper(context, self.name)
+            logger.info(f"Using in-block simulation with titanoboa (reusing simulator)")
+            
+            # Initialize block building helper with the shared simulator
+            helper = BlockBuildingHelper(self.name, evm_simulator)
+
+            evm_simulator.fork_at_block(helper.context.block_number - 1)
 
             # Main block building loop
             self._fill_orders(order_store, helper, failed_orders, order_attempts)
@@ -458,16 +471,16 @@ def run_builders(
     simulated_orders: List[SimulatedOrder], 
     config: dict, 
     builder_names: List[str],
-    context: SimulationContext
+    evm_simulator: EVMSimulator_pyEVM
 ) -> List[BlockResult]:
     """
-    Run multiple builders and return their results.
+    Run multiple builders and return their results with in-block EVM simulation.
     
     Args:
         simulated_orders: Successfully simulated orders
         config: Full configuration dictionary
         builder_names: Names of builders to run
-        context: Block building context
+        evm_simulator: Pre-created EVM simulator instance for reuse
         
     Returns:
         List of block building results
@@ -494,9 +507,9 @@ def run_builders(
             logger.warning(f"Skipping non-ordering builder: {builder_name}")
             continue
         
-        # Create and run builder
+        # Create and run builder with the shared EVM simulator
         builder = create_ordering_builder(builder_config)
-        result = builder.build_block(simulated_orders, context)
+        result = builder.build_block(simulated_orders, evm_simulator)
         results.append(result)
     
     return results
