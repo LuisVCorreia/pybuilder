@@ -11,13 +11,15 @@ class BlockTrace:
     """
     Block building trace information.
     """
-    bid_value: int  # Total bid value in wei
+    bid_value: int  # True bid value after subtracting payout gas cost (wei)
     gas_used: int   # Total gas used
     gas_limit: int  # Block gas limit
     blob_gas_used: int = 0  # Total blob gas used  
     num_orders: int = 0 # Number of orders included
     orders_closed_at: float = 0.0  # Timestamp when orders were closed
     fill_time_ms: float = 0.0  # Time spent filling orders (milliseconds)
+    raw_coinbase_profit: int = 0  # Raw coinbase profit before payout gas deduction
+    payout_gas_cost: int = 0  # Expected cost of payout transaction (wei)
 
 
 @dataclass  
@@ -104,7 +106,11 @@ class BuilderComparison:
             
             for i, result in enumerate(successful_results, 1):
                 print(f"{i}. {result.builder_name}")
-                print(f"   Bid Value: {result.bid_value / 10**18:.6f} ETH")
+                print(f"   True Bid Value: {result.bid_value / 10**18:.6f} ETH")
+                if hasattr(result.block_trace, 'raw_coinbase_profit') and result.block_trace.raw_coinbase_profit:
+                    print(f"   Raw Coinbase Profit: {result.block_trace.raw_coinbase_profit / 10**18:.6f} ETH")
+                    if hasattr(result.block_trace, 'payout_gas_cost') and result.block_trace.payout_gas_cost:
+                        print(f"   Payout Gas Cost: {result.block_trace.payout_gas_cost / 10**18:.6f} ETH")
                 print(f"   Gas Used: {result.total_gas_used:,}")
                 print(f"   Orders: {result.block_trace.num_orders if result.block_trace else 0}")
                 print(f"   Build Time: {result.build_time_ms:.2f}ms")
@@ -143,7 +149,11 @@ class BuilderComparison:
         print(f"WINNING BUILDER: {best.builder_name.upper()}")
         print("="*80)
         
-        print(f"Builder profit: {best.bid_value / 10**18:.6f} ETH")
+        print(f"True builder profit: {best.bid_value / 10**18:.6f} ETH")
+        if hasattr(best.block_trace, 'raw_coinbase_profit') and best.block_trace.raw_coinbase_profit:
+            print(f"Raw coinbase profit: {best.block_trace.raw_coinbase_profit / 10**18:.6f} ETH")
+            if hasattr(best.block_trace, 'payout_gas_cost') and best.block_trace.payout_gas_cost:
+                print(f"Payout gas cost: {best.block_trace.payout_gas_cost / 10**18:.6f} ETH")
         print(f"Number of used orders: {len(best.included_orders)}")
         print(f"Gas used: {best.total_gas_used:,}")
         print(f"Build time: {best.build_time_ms:.2f}ms")

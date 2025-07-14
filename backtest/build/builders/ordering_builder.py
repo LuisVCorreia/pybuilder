@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import List, Dict, Set, Optional, Any, Callable
 from collections import defaultdict
 
+from eth_typing import Address
+
 from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue
 from backtest.build.simulation.evm_simulator import EVMSimulator_pyEVM
 from backtest.common.order import OrderId, TxNonce
@@ -85,6 +87,58 @@ class BlockBuildingHelper:
         """Check if order can be added without exceeding gas limits."""
         return (self.gas_used + order.sim_value.gas_used <= self.context.block_gas_limit)
     
+    def get_proposer_payout_tx_value(self, fee_recipient: str = None) -> Optional[int]:
+        """
+        Gets the block profit excluding the expected payout gas that we'll pay.
+        
+        Args:
+            fee_recipient: The fee recipient address (defaults to context coinbase)
+            
+        Returns:
+            The true block value after subtracting payout gas cost, or None if profit too low
+        """
+        if fee_recipient is None:
+            fee_recipient = self.context.coinbase
+        
+        # Estimate gas limit for payout transaction
+        payout_gas_limit = self._estimate_payout_gas_limit(fee_recipient)
+        payout_gas_cost = payout_gas_limit * self.context.block_base_fee
+        
+        if self.coinbase_profit >= payout_gas_cost:
+            return self.coinbase_profit - payout_gas_cost
+        else:
+            logger.warning(f"Profit too low to cover payout tx gas: {self.coinbase_profit} < {payout_gas_cost}")
+            return None
+    
+    def _estimate_payout_gas_limit(self, to_address: str, use_simulation: bool = True) -> int:
+        """
+        Estimate gas limit for payout transaction using rbuilder's approach:
+        - If recipient is EOA (no code): 21,000 gas
+        - If recipient is contract: 100,000 gas
+        
+        Args:
+            to_address: The recipient address
+            use_simulation: Whether to use EVM simulation (default True)
+            
+        Returns:
+            Estimated gas limit for the payout transaction
+        """        
+        try:
+            # Get the code at the address - if empty, it's an EOA
+            code = self.simulator.env.get_code(Address(to_address))
+            if not code or code == b'':
+                logger.debug(f"Address {to_address} is EOA (no code), using 21k gas")
+                return 21_000
+            else:
+                logger.debug(f"Address {to_address} is contract (has code)")
+        except Exception as e:
+            logger.debug(f"Could not query code for {to_address}: {e}, assuming EOA")
+            return 21_000
+        
+        # It's a contract address
+        # rbuilder uses binary search + multiple simulations to find minimum gas but we use a reasonable estimate
+        return 100_000
+
     def commit_order(self, order: SimulatedOrder, 
                     profit_validator: Callable[[SimValue, SimValue], None]) -> Dict[str, Any]:
         """
@@ -176,8 +230,24 @@ class BlockBuildingHelper:
         """
         fill_time_ms = (time.time() - self.fill_start_time) * 1000
         
+        # Calculate true block value by subtracting expected payout gas cost
+        true_block_value = self.get_proposer_payout_tx_value()
+        
+        final_bid_value = true_block_value if true_block_value is not None else 0
+        
+        payout_gas_limit = self._estimate_payout_gas_limit(self.context.coinbase)
+        payout_gas_cost = payout_gas_limit * self.context.block_base_fee
+        
+        logger.info(f"{self.builder_name} block finalized: "
+                   f"raw_profit={self.coinbase_profit / 10**18:.6f} ETH, "
+                   f"payout_gas_cost={payout_gas_cost / 10**18:.6f} ETH "
+                   f"(gas_limit={payout_gas_limit}), "
+                   f"true_block_value={final_bid_value / 10**18:.6f} ETH")
+        
         trace = BlockTrace(
-            bid_value=self.coinbase_profit,
+            bid_value=final_bid_value,
+            raw_coinbase_profit=self.coinbase_profit,
+            payout_gas_cost=payout_gas_cost,
             gas_used=self.gas_used,
             gas_limit=self.context.block_gas_limit,
             blob_gas_used=self.blob_gas_used,
