@@ -34,7 +34,6 @@ class SimulationContext:
     def from_onchain_block(cls, onchain_block: dict, winning_bid_trace: dict = None) -> 'SimulationContext':
         """
         Create SimulationContext from onchain block data.
-        This mirrors rbuilder's BlockBuildingContext::from_onchain_block()
         """
 
         # Extract all the fields we need for proper block header construction

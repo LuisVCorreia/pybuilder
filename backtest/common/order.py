@@ -41,7 +41,6 @@ class OrderType(enum.Enum):
 @dataclass(frozen=True)
 class OrderId:
     """
-    Unique identifier for an Order; mirrors Rust's OrderId enum.
     Formats:
       - tx:0x<hash>
       - bundle:<uuid>
@@ -52,6 +51,61 @@ class OrderId:
 
     def __str__(self) -> str:
         return f"{self.type.value}:{self.value}"
+    
+    def fixed_bytes(self) -> bytes:
+        """
+        Convert OrderId to fixed 32-byte representation for comparison.
+        """
+        if self.type in (OrderType.TX, OrderType.SHAREBUNDLE):
+            # For tx and sharebundle, use the hash directly
+            hex_str = self.value[2:] if self.value.startswith('0x') else self.value
+            # Pad to 64 hex characters (32 bytes) if needed
+            hex_str = hex_str.zfill(64)
+            return bytes.fromhex(hex_str)
+        elif self.type == OrderType.BUNDLE:
+            # For bundle, convert UUID to bytes and pad to 32 bytes
+            import uuid
+            bundle_uuid = uuid.UUID(self.value)
+            uuid_bytes = bundle_uuid.bytes  # 16 bytes
+            # Pad with zeros to make 32 bytes (like Rust implementation)
+            return uuid_bytes + b'\x00' * 16
+        else:
+            raise ValueError(f"Unknown OrderType: {self.type}")
+    
+    def _rank(self) -> int:
+        """Get the rank for tie-breaking."""
+        if self.type == OrderType.TX:
+            return 1
+        elif self.type == OrderType.BUNDLE:
+            return 2
+        elif self.type == OrderType.SHAREBUNDLE:
+            return 3
+        else:
+            raise ValueError(f"Unknown OrderType: {self.type}")
+    
+    def __lt__(self, other: 'OrderId') -> bool:
+        """Compare OrderIds using fixed bytes first, then rank."""
+        if not isinstance(other, OrderId):
+            return NotImplemented
+        
+        # First compare fixed bytes
+        self_bytes = self.fixed_bytes()
+        other_bytes = other.fixed_bytes()
+        
+        if self_bytes != other_bytes:
+            return self_bytes < other_bytes
+        
+        # If bytes are equal, compare by rank
+        return self._rank() < other._rank()
+    
+    def __le__(self, other: 'OrderId') -> bool:
+        return self == other or self < other
+    
+    def __gt__(self, other: 'OrderId') -> bool:
+        return not self <= other
+    
+    def __ge__(self, other: 'OrderId') -> bool:
+        return not self < other
 
     @classmethod
     def from_tx(cls, tx_hash: Union[str, bytes]) -> 'OrderId':

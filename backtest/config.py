@@ -1,5 +1,8 @@
 import os
 import yaml
+import logging
+
+logger = logging.getLogger(__name__)
 
 def load_config(path: str) -> dict:
     with open(os.path.expanduser(path)) as f:
@@ -10,4 +13,47 @@ def load_config(path: str) -> dict:
     cfg["fetch_rpc_url"]     = os.path.expandvars(cfg["fetch_rpc_url"])
     cfg["logging_level"]    = cfg.get("logging_level", "INFO")
     cfg["fetch_concurrency_limit"] = cfg.get("fetch_concurrency_limit", 1)
+    
+    _validate_builders(cfg)
+    
     return cfg
+
+
+def _validate_builders(config: dict) -> None:
+    builders = config.get('builders', [])
+    
+    if not builders:
+        logger.warning("No builders configured")
+        return
+    
+    valid_algos = {'ordering-builder', 'parallel-builder'}
+    valid_sortings = {'max-profit', 'mev-gas-price'}
+    
+    for builder in builders:
+        name = builder.get('name', 'unnamed')
+        algo = builder.get('algo')
+        
+        # Validate algorithm
+        if algo not in valid_algos:
+            raise ValueError(f"Builder {name}: invalid algo '{algo}'. Must be one of: {valid_algos}")
+        
+        # Validate ordering builder specific fields
+        if algo == 'ordering-builder':
+            sorting = builder.get('sorting')
+            if sorting not in valid_sortings:
+                raise ValueError(f"Builder {name}: invalid sorting '{sorting}'. Must be one of: {valid_sortings}")
+        
+        logger.debug(f"Validated builder: {name} ({algo})")
+
+
+def get_builder_config(config: dict, builder_name: str) -> dict:
+    builders = config.get('builders', [])
+    for builder in builders:
+        if builder.get('name') == builder_name:
+            return builder
+    raise ValueError(f"Builder '{builder_name}' not found in configuration")
+
+
+def get_ordering_builders(config: dict) -> list:
+    builders = config.get('builders', [])
+    return [b for b in builders if b.get('algo') == 'ordering-builder']

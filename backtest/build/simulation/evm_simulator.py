@@ -6,7 +6,7 @@ import web3
 from .sim_tree import NonceKey, SimTree, SimulatedResult
 from .sim_utils import SimulationContext, SimulatedOrder, SimValue, OrderSimResult, SimulationError
 from .state_trace import UsedStateTrace
-from .state_tracer import TracingEVMWrapper, create_tracing_evm
+# from .state_tracer import TracingEVMWrapper, create_tracing_evm
 from eth_abi import decode
 
 from boa.vm.py_evm import Address
@@ -534,9 +534,8 @@ class EVMSimulator_pyEVM:
         """Calculate coinbase profit from balance change"""
         return max(0, final_balance - initial_balance)
 
-def simulate_orders(orders: List[Order], block_data: BlockData, rpc_url: str, enable_tracing: bool = True) -> List[SimulatedOrder]:
+def simulate_orders(orders: List[Order], rpc_url: str, context: SimulationContext) -> List[SimulatedOrder]:
     try:
-        context = SimulationContext.from_onchain_block(block_data.onchain_block)
         simulator = EVMSimulator_pyEVM(context, rpc_url)
 
         # 1. Get initial on-chain nonces once.

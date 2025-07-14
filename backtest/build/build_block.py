@@ -2,7 +2,9 @@ import logging
 import os
 from backtest.common.store import HistoricalDataStorage
 from backtest.build.simulation.evm_simulator import simulate_orders
-
+from backtest.build.builders.ordering_builder import run_builders
+from backtest.build.builders.block_result import BuilderComparison
+from backtest.build.simulation.sim_utils import SimulationContext
 logger = logging.getLogger(__name__)
 
 class LandedBlockFromDBOrdersSource:
@@ -59,8 +61,13 @@ def run_backtest(args, config):
     # Expand environment variables in the URL
     rpc_url = os.path.expandvars(rpc_url)
 
+    context = SimulationContext.from_onchain_block(
+        order_source.block_data.onchain_block,
+        order_source.block_data.winning_bid_trace
+    )
+
     logger.info("Simulating orders...")
-    simulated_orders = simulate_orders(order_objects, order_source.block_data, rpc_url)
+    simulated_orders = simulate_orders(order_objects, rpc_url, context)
     logger.info(f"Simulation complete. Got {len(simulated_orders)} simulated orders.")
     
     # Print simulation results
@@ -96,9 +103,37 @@ def run_backtest(args, config):
         for sim in simulated_orders:
             f.write(f"{sim.order.id()}: {sim.simulation_result.gas_used}, {sim.simulation_result.coinbase_profit}\n")
 
-    # Placeholder for builder logic
+    # Run builders
     logger.info("Running builders...")
-
     
-    # best_bid = run_builders(simulated_orders, config, args.builders)
-    # logger.info(f"Block building complete. Best bid: {best_bid}")
+    # Get builder names from args or config
+    builder_names = getattr(args, 'builders', None)
+    if not builder_names:
+        # Default to all ordering builders in config
+        builder_names = [
+            b['name'] for b in config.get('builders', []) 
+            if b.get('algo') == 'ordering-builder'
+        ]
+    
+    if not builder_names:
+        logger.warning("No builders specified or found in config")
+        return
+    
+    logger.info(f"Running builders: {builder_names}")
+    
+    # Run all builders
+    results = run_builders(successful_sims, config, builder_names, context)
+    
+    # Display comparison
+    BuilderComparison.print_comparison(results)
+    
+    # Display detailed winning builder results in rbuilder style
+    BuilderComparison.print_winning_builder_details(results)
+    
+    # Select and log winner
+    best_result = BuilderComparison.select_best_builder(results)
+    if best_result:
+        logger.info(f"Block building complete. Best builder: {best_result.builder_name} "
+                   f"with {best_result.bid_value / 10**18:.6f} ETH")
+    else:
+        logger.info("Block building complete. No successful builders.")
