@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from backtest.build.simulation.sim_utils import SimulatedOrder
 
 logger = logging.getLogger(__name__)
@@ -12,14 +12,14 @@ class BlockTrace:
     Block building trace information.
     """
     bid_value: int  # True bid value after subtracting payout gas cost (wei)
-    gas_used: int   # Total gas used
-    gas_limit: int  # Block gas limit
-    blob_gas_used: int = 0  # Total blob gas used  
-    num_orders: int = 0 # Number of orders included
-    orders_closed_at: float = 0.0  # Timestamp when orders were closed
-    fill_time_ms: float = 0.0  # Time spent filling orders (milliseconds)
-    raw_coinbase_profit: int = 0  # Raw coinbase profit before payout gas deduction
-    payout_gas_cost: int = 0  # Expected cost of payout transaction (wei)
+    gas_used: int
+    gas_limit: int
+    blob_gas_used: int = 0
+    num_orders: int = 0
+    orders_closed_at: float = 0.0
+    fill_time_ms: float = 0.0
+    raw_coinbase_profit: int = 0
+    payout_gas_cost: int = 0
 
 
 @dataclass  

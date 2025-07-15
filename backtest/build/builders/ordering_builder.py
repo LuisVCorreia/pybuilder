@@ -4,22 +4,21 @@ from dataclasses import dataclass
 from typing import List, Dict, Set, Optional, Any, Callable
 from collections import defaultdict
 
-from eth_typing import Address
-
 from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue
-from backtest.build.simulation.evm_simulator import EVMSimulator_pyEVM
+from backtest.build.simulation.evm_simulator import EVMSimulator
 from backtest.common.order import OrderId, TxNonce
 from .order_priority import (
     Sorting, 
     PrioritizedOrderStore, 
     create_priority_class, 
-    OrderPriority
 )
-from .nonce_manager import NonceCache
 from .block_result import BlockResult, BlockTrace
 
 logger = logging.getLogger(__name__)
 
+# Assume standard payout tx gas limit
+# rbuilder uses more complex logic to estimate this, but for simple backtesting we can use a fixed value
+PAYOUT_GAS_LIMIT = 21000  
 
 @dataclass
 class OrderingBuilderConfig:
@@ -70,7 +69,7 @@ class BlockBuildingHelper:
     - Nonce state updates
     """
     
-    def __init__(self, builder_name: str, simulator: EVMSimulator_pyEVM):
+    def __init__(self, builder_name: str, simulator: EVMSimulator):
         self.context = simulator.context
         self.builder_name = builder_name
         self.simulator = simulator  # Now required, not optional
@@ -100,44 +99,13 @@ class BlockBuildingHelper:
         if fee_recipient is None:
             fee_recipient = self.context.coinbase
         
-        # Estimate gas limit for payout transaction
-        payout_gas_limit = self._estimate_payout_gas_limit(fee_recipient)
-        payout_gas_cost = payout_gas_limit * self.context.block_base_fee
+        payout_gas_cost = PAYOUT_GAS_LIMIT * self.context.block_base_fee
         
         if self.coinbase_profit >= payout_gas_cost:
             return self.coinbase_profit - payout_gas_cost
         else:
             logger.warning(f"Profit too low to cover payout tx gas: {self.coinbase_profit} < {payout_gas_cost}")
             return None
-    
-    def _estimate_payout_gas_limit(self, to_address: str, use_simulation: bool = True) -> int:
-        """
-        Estimate gas limit for payout transaction using rbuilder's approach:
-        - If recipient is EOA (no code): 21,000 gas
-        - If recipient is contract: 100,000 gas
-        
-        Args:
-            to_address: The recipient address
-            use_simulation: Whether to use EVM simulation (default True)
-            
-        Returns:
-            Estimated gas limit for the payout transaction
-        """        
-        try:
-            # Get the code at the address - if empty, it's an EOA
-            code = self.simulator.env.get_code(Address(to_address))
-            if not code or code == b'':
-                logger.debug(f"Address {to_address} is EOA (no code), using 21k gas")
-                return 21_000
-            else:
-                logger.debug(f"Address {to_address} is contract (has code)")
-        except Exception as e:
-            logger.debug(f"Could not query code for {to_address}: {e}, assuming EOA")
-            return 21_000
-        
-        # It's a contract address
-        # rbuilder uses binary search + multiple simulations to find minimum gas but we use a reasonable estimate
-        return 100_000
 
     def commit_order(self, order: SimulatedOrder, 
                     profit_validator: Callable[[SimValue, SimValue], None]) -> Dict[str, Any]:
@@ -235,13 +203,12 @@ class BlockBuildingHelper:
         
         final_bid_value = true_block_value if true_block_value is not None else 0
         
-        payout_gas_limit = self._estimate_payout_gas_limit(self.context.coinbase)
-        payout_gas_cost = payout_gas_limit * self.context.block_base_fee
+        payout_gas_cost = PAYOUT_GAS_LIMIT * self.context.block_base_fee
         
         logger.info(f"{self.builder_name} block finalized: "
                    f"raw_profit={self.coinbase_profit / 10**18:.6f} ETH, "
                    f"payout_gas_cost={payout_gas_cost / 10**18:.6f} ETH "
-                   f"(gas_limit={payout_gas_limit}), "
+                   f"(gas_limit={PAYOUT_GAS_LIMIT}), "
                    f"true_block_value={final_bid_value / 10**18:.6f} ETH")
         
         trace = BlockTrace(
@@ -282,7 +249,7 @@ class OrderingBuilder:
     def build_block(
         self,
         simulated_orders: List[SimulatedOrder], 
-        evm_simulator: EVMSimulator_pyEVM
+        evm_simulator: EVMSimulator
     ) -> BlockResult:
         """
         Build a block using the ordering algorithm with in-block EVM simulation.
@@ -541,7 +508,7 @@ def run_builders(
     simulated_orders: List[SimulatedOrder], 
     config: dict, 
     builder_names: List[str],
-    evm_simulator: EVMSimulator_pyEVM
+    evm_simulator: EVMSimulator
 ) -> List[BlockResult]:
     """
     Run multiple builders and return their results with in-block EVM simulation.

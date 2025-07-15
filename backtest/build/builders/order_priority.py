@@ -3,7 +3,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Set, Optional, Any
+from typing import Dict, List, Set, Optional
 from collections import defaultdict
 
 from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue
@@ -234,7 +234,6 @@ class PrioritizedOrderStore:
         # Update nonces and collect invalidated orders
         for new_nonce in new_nonces:
             account = new_nonce.address
-            old_nonce = self.onchain_nonces.get(account, 0)
             self.onchain_nonces[account] = new_nonce.nonce
             
             # Collect orders that might be invalidated

@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--show-orders", action="store_true", help="Show all available orders")
     parser.add_argument("--show-sim", action="store_true", help="Show order data and top of block simulation results")
     parser.add_argument("--no-block-building", action="store_true", help="Skip the block building process")
-    parser.add_argument("--builders", nargs='+', default=["mp-ordering"], help="Builders to build block with")
+    parser.add_argument("--builders", nargs='+', default=[], help="Builders to build block with")
 
     # Arguments from ExtraCfg
     parser.add_argument("block", type=int, help="Block number to build")

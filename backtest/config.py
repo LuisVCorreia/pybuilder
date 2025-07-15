@@ -44,16 +44,3 @@ def _validate_builders(config: dict) -> None:
                 raise ValueError(f"Builder {name}: invalid sorting '{sorting}'. Must be one of: {valid_sortings}")
         
         logger.debug(f"Validated builder: {name} ({algo})")
-
-
-def get_builder_config(config: dict, builder_name: str) -> dict:
-    builders = config.get('builders', [])
-    for builder in builders:
-        if builder.get('name') == builder_name:
-            return builder
-    raise ValueError(f"Builder '{builder_name}' not found in configuration")
-
-
-def get_ordering_builders(config: dict) -> list:
-    builders = config.get('builders', [])
-    return [b for b in builders if b.get('algo') == 'ordering-builder']

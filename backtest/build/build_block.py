@@ -1,7 +1,7 @@
 import logging
 import os
 from backtest.common.store import HistoricalDataStorage
-from backtest.build.simulation.evm_simulator import simulate_orders, EVMSimulator_pyEVM
+from backtest.build.simulation.evm_simulator import simulate_orders, EVMSimulator
 from backtest.build.builders.ordering_builder import run_builders
 from backtest.build.builders.block_result import BuilderComparison
 from backtest.build.simulation.sim_utils import SimulationContext
@@ -67,7 +67,7 @@ def run_backtest(args, config):
     )
 
     logger.info("Creating EVM simulator...")
-    evm_simulator = EVMSimulator_pyEVM(context, rpc_url)
+    evm_simulator = EVMSimulator(context, rpc_url)
 
     logger.info("Simulating orders...")
     simulated_orders = simulate_orders(order_objects, evm_simulator)
