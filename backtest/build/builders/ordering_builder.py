@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import List, Dict, Set, Optional, Any, Callable
 from collections import defaultdict
+from .parallel_builder import run_parallel_builder
 
 from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue
 from backtest.build.simulation.evm_simulator import EVMSimulator
@@ -538,15 +539,23 @@ def run_builders(
             continue
         
         builder_config = builder_configs[builder_name]
+        builder_algo = builder_config.get('algo')
         
-        # Only handle ordering builders for now
-        if builder_config.get('algo') != 'ordering-builder':
-            logger.warning(f"Skipping non-ordering builder: {builder_name}")
-            continue
-        
-        # Create and run builder with the shared EVM simulator
-        builder = create_ordering_builder(builder_config)
-        result = builder.build_block(simulated_orders, evm_simulator)
-        results.append(result)
+        if builder_algo == 'ordering-builder':
+            builder = create_ordering_builder(builder_config)
+            result = builder.build_block(simulated_orders, evm_simulator)
+            results.append(result)
+            
+        elif builder_algo == 'parallel-builder':
+            result = run_parallel_builder(simulated_orders, config, evm_simulator)
+            results.append(result)
+            
+        else:
+            logger.warning(f"Unknown builder algorithm: {builder_algo} for {builder_name}")
+            results.append(BlockResult(
+                builder_name=builder_name,
+                success=False,
+                error_message=f"Unknown builder algorithm: {builder_algo}"
+            ))
     
     return results
