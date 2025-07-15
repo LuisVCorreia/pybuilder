@@ -14,6 +14,7 @@ from eth.vm.forks.cancun.headers import CancunBlockHeader
 from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareBundleOrder
 from .sim_tree import SimTree, SimulatedResult, NonceKey
 from .sim_utils import SimulationContext, SimulatedOrder, SimValue, OrderSimResult, SimulationError
+from .pyevm_opcode_state_tracer import PyEVMOpcodeStateTracer
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,8 @@ class EVMSimulator:
         self.recent_block_hashes: List[bytes] = []
         self.fork_at_block(self.context.block_number - 1)
         self._fetch_recent_block_hashes(self.context.block_number)
+        self.state_tracer = PyEVMOpcodeStateTracer(self.env)            
+
 
     def simulate_tx_order(self, order: TxOrder) -> SimulatedOrder:
         logger.info(f"Simulating transaction {order.id()}")
@@ -47,6 +50,8 @@ class EVMSimulator:
 
     def simulate_bundle_order(self, order: BundleOrder) -> SimulatedOrder:
         total_gas, total_profit = 0, 0
+        combined_trace = None
+        
         for child_order, optional in order.child_orders:
             res = self._execute_tx(child_order.get_transaction_data())
             if not res.success and not optional:
@@ -54,7 +59,26 @@ class EVMSimulator:
             if res.success:
                 total_gas += res.gas_used
                 total_profit += res.coinbase_profit
-        combined = OrderSimResult(success=True, gas_used=total_gas, coinbase_profit=total_profit, blob_gas_used=0, paid_kickbacks=0, error=None, error_message=None, state_changes=None, state_trace=None)
+                
+                # Aggregate state traces
+                if res.state_trace:
+                    if combined_trace is None:
+                        combined_trace = res.state_trace
+                    else:
+                        # Merge traces following rbuilder's pattern
+                        combined_trace = combined_trace.merge(res.state_trace)
+        
+        combined = OrderSimResult(
+            success=True, 
+            gas_used=total_gas, 
+            coinbase_profit=total_profit, 
+            blob_gas_used=0, 
+            paid_kickbacks=0, 
+            error=None, 
+            error_message=None, 
+            state_changes=None, 
+            state_trace=combined_trace
+        )
         return self._convert_result_to_simulated_order(order, combined)
 
     def simulate_share_bundle_order(self, order: ShareBundleOrder) -> SimulatedOrder:
@@ -113,8 +137,18 @@ class EVMSimulator:
 
             self.override_execution_context()  # Ensure execution context is set correctly
 
+            # Start state tracing (patches EVM opcodes)
+            self.state_tracer.start_tracing(tx)
+
+
             # Apply the transaction with the header
             receipt, computation = self.env.evm.vm.apply_transaction(header, tx)
+
+            # Finish state tracing and get the trace (pass tx for simple transfer handling)
+            state_trace = self.state_tracer.finish_tracing(computation, tx)
+            print(state_trace.summary())
+            # Clean up tracing (restore original opcodes)
+            self.state_tracer.cleanup()
 
             final_coinbase_balance = self.env.get_balance(coinbase_addr)
             coinbase_profit = self._calculate_coinbase_profit(initial_coinbase_balance, final_coinbase_balance)
@@ -128,7 +162,7 @@ class EVMSimulator:
                 error=None,
                 error_message=None,
                 state_changes=None,
-                state_trace=None
+                state_trace=state_trace
             )
 
         except Exception as e:

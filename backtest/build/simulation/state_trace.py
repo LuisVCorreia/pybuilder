@@ -35,10 +35,7 @@ class UsedStateTrace:
     # Contract lifecycle
     created_contracts: List[str] = field(default_factory=list)
     destructed_contracts: List[str] = field(default_factory=list)
-    
-    # Access tracking (for gas optimization)
-    accessed_addresses: Set[str] = field(default_factory=set)
-    accessed_storage_keys: Set[SlotKey] = field(default_factory=set)
+
 
     def merge(self, other: 'UsedStateTrace') -> 'UsedStateTrace':
         """Merge another trace into this one (for bundle orders)"""
@@ -60,10 +57,6 @@ class UsedStateTrace:
         merged.created_contracts = list(set(self.created_contracts + other.created_contracts))
         merged.destructed_contracts = list(set(self.destructed_contracts + other.destructed_contracts))
         
-        # Combine access sets
-        merged.accessed_addresses = self.accessed_addresses | other.accessed_addresses
-        merged.accessed_storage_keys = self.accessed_storage_keys | other.accessed_storage_keys
-        
         return merged
 
     def _merge_amounts(self, amounts1: Dict[str, int], amounts2: Dict[str, int]) -> Dict[str, int]:
@@ -72,13 +65,6 @@ class UsedStateTrace:
         for addr, amount in amounts2.items():
             merged[addr] = merged.get(addr, 0) + amount
         return merged
-
-    def get_total_gas_estimate(self) -> int:
-        """Estimate additional gas costs from state access patterns"""
-        # This is a rough estimate based on EIP-2929 gas costs
-        cold_account_access = len(self.accessed_addresses) * 2600  # COLD_ACCOUNT_ACCESS_COST
-        cold_sload = len(self.accessed_storage_keys) * 2100       # COLD_SLOAD_COST
-        return cold_account_access + cold_sload
 
     def conflicts_with(self, other: 'UsedStateTrace') -> bool:
         """Check if this trace conflicts with another (for MEV conflict detection)"""
@@ -101,17 +87,47 @@ class UsedStateTrace:
             
         return False
 
-    def summary(self) -> Dict[str, Any]:
-        """Get a summary of the trace for logging/debugging"""
-        return {
-            "storage_reads": len(self.read_slot_values),
-            "storage_writes": len(self.written_slot_values),
-            "balance_reads": len(self.read_balances),
-            "accounts_with_received": len(self.received_amount),
-            "accounts_with_sent": len(self.sent_amount),
-            "contracts_created": len(self.created_contracts),
-            "contracts_destructed": len(self.destructed_contracts),
-            "total_accessed_addresses": len(self.accessed_addresses),
-            "total_accessed_storage": len(self.accessed_storage_keys),
-            "estimated_gas_overhead": self.get_total_gas_estimate()
-        }
+    def summary(self) -> str:
+        """
+        Generates a readable, multi-line string summary of the state trace.
+        """
+        output_lines = ["\n--- Dumping UsedStateTrace (Python) ---"]
+
+        if self.read_slot_values:
+            output_lines.append("\n[Read Slots]")
+            for slot_key, value in self.read_slot_values.items():
+                # Format integers as hex for direct comparison with Rust's B256/U256 output
+                output_lines.append(f"  - Address: {slot_key.address}, Slot: {hex(slot_key.slot)}, Value: {hex(value)}")
+
+        if self.written_slot_values:
+            output_lines.append("\n[Written Slots]")
+            for slot_key, value in self.written_slot_values.items():
+                output_lines.append(f"  - Address: {slot_key.address}, Slot: {hex(slot_key.slot)}, Value: {hex(value)}")
+
+        if self.read_balances:
+            output_lines.append("\n[Read Balances]")
+            for address, balance in self.read_balances.items():
+                output_lines.append(f"  - Address: {address}, Balance: {balance}")
+
+        if self.received_amount:
+            output_lines.append("\n[Received Amounts (Wei)]")
+            for address, amount in self.received_amount.items():
+                output_lines.append(f"  - Address: {address}, Amount: {amount}")
+
+        if self.sent_amount:
+            output_lines.append("\n[Sent Amounts (Wei)]")
+            for address, amount in self.sent_amount.items():
+                output_lines.append(f"  - Address: {address}, Amount: {amount}")
+
+        if self.created_contracts:
+            output_lines.append("\n[Created Contracts]")
+            for address in self.created_contracts:
+                output_lines.append(f"  - Address: {address}")
+
+        if self.destructed_contracts:
+            output_lines.append("\n[Destructed Contracts]")
+            for address in self.destructed_contracts:
+                output_lines.append(f"  - Address: {address}")
+
+        output_lines.append("--- End of Trace Dump ---\n")
+        return "\n".join(output_lines)
