@@ -15,6 +15,7 @@ from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareB
 from .sim_tree import SimTree, SimulatedResult, NonceKey
 from .sim_utils import SimulationContext, SimulatedOrder, SimValue, OrderSimResult, SimulationError
 from .pyevm_opcode_state_tracer import PyEVMOpcodeStateTracer
+from .state_trace import UsedStateTrace
 
 logger = logging.getLogger(__name__)
 
@@ -26,79 +27,33 @@ class EVMSimulator:
         self.env = Env(fast_mode_enabled=True, fork_try_prefetch_state=True)
         self.vm = self.env.evm.vm
         self.rpc_url = rpc_url
-        self.recent_block_hashes: List[bytes] = []
-        self.fork_at_block(self.context.block_number - 1)
-        self._fetch_recent_block_hashes(self.context.block_number)
-        self.state_tracer = PyEVMOpcodeStateTracer(self.env)            
-
-
-    def simulate_tx_order(self, order: TxOrder) -> SimulatedOrder:
-        logger.info(f"Simulating transaction {order.id()}")
-        if not isinstance(order, TxOrder):
-            logger.error(f"simulate_tx_order called with non-TxOrder: {type(order)}")
-            error_result = OrderSimResult(success=False, gas_used=0, error=SimulationError.UNKNOWN_ERROR, error_message="simulate_tx_order called with non-TxOrder")
-            return self._convert_result_to_simulated_order(order, error_result)
-        try:
-            tx_data = order.get_transaction_data()
-            result = self._execute_tx(tx_data)
-            logger.info(f"Simulation result: {result.success}, gas used: {result.gas_used}, coinbase profit: {result.coinbase_profit}")
-            return self._convert_result_to_simulated_order(order, result)
-        except Exception as e:
-            logger.error(f"Failed to simulate tx order {getattr(order, 'id', lambda: '?')()}: {e}")
-            error_result = OrderSimResult(success=False, gas_used=0, error=SimulationError.VALIDATION_ERROR, error_message=str(e))
-            return self._convert_result_to_simulated_order(order, error_result)
-
-    def simulate_bundle_order(self, order: BundleOrder) -> SimulatedOrder:
-        total_gas, total_profit = 0, 0
-        combined_trace = None
-        
-        for child_order, optional in order.child_orders:
-            res = self._execute_tx(child_order.get_transaction_data())
-            if not res.success and not optional:
-                return self._convert_result_to_simulated_order(order, res)
-            if res.success:
-                total_gas += res.gas_used
-                total_profit += res.coinbase_profit
-                
-                # Aggregate state traces
-                if res.state_trace:
-                    if combined_trace is None:
-                        combined_trace = res.state_trace
-                    else:
-                        # Merge traces following rbuilder's pattern
-                        combined_trace = combined_trace.merge(res.state_trace)
-        
-        combined = OrderSimResult(
-            success=True, 
-            gas_used=total_gas, 
-            coinbase_profit=total_profit, 
-            blob_gas_used=0, 
-            paid_kickbacks=0, 
-            error=None, 
-            error_message=None, 
-            state_changes=None, 
-            state_trace=combined_trace
-        )
-        return self._convert_result_to_simulated_order(order, combined)
-
-    def simulate_share_bundle_order(self, order: ShareBundleOrder) -> SimulatedOrder:
-        if not isinstance(order, ShareBundleOrder):
-            logger.error(f"simulate_share_bundle_order called with non-ShareBundleOrder: {type(order)}")
-            error_result = OrderSimResult(success=False, gas_used=0, error=SimulationError.UNKNOWN_ERROR, error_message="simulate_share_bundle_order called with non-ShareBundleOrder")
-            return self._convert_result_to_simulated_order(order, error_result)
-        return self.simulate_bundle_order(order)
+        self.prev_block_hashes = []
+        self._fork_at_block(self.context.block_number - 1)
+        self._fetch_prev_block_hashes(self.context.block_number)
+        self.state_tracer = PyEVMOpcodeStateTracer(self.env)       
 
     def simulate_order_with_parents(self, order: Order, parent_orders: List[Order] = None) -> SimulatedOrder:
         parent_orders = parent_orders or []
         try:
-            self.fork_at_block(self.context.block_number - 1)
+            self._fork_at_block(self.context.block_number - 1)
+            
+            accumulated_trace = UsedStateTrace()
+            
+            # Simulate parent orders and accumulate their traces
             for parent_order in parent_orders:
-                parent_res = self._simulate_single_order(parent_order)
+                parent_res = self._simulate_single_order(parent_order, accumulated_trace)
                 if not parent_res.simulation_result.success:
                     error_message = f"Parent order failed: {parent_res.simulation_result.error_message}"
                     error_result = OrderSimResult(success=False, gas_used=0, coinbase_profit=0, blob_gas_used=0, paid_kickbacks=0, error=SimulationError.VALIDATION_ERROR, error_message=error_message)
                     return self._convert_result_to_simulated_order(order, error_result)
-            return self._simulate_single_order(order)
+                
+                # Accumulate parent's state trace
+                if parent_res.simulation_result.state_trace:
+                    accumulated_trace = parent_res.simulation_result.state_trace
+
+            # Simulate the final order
+            final_res = self._simulate_single_order(order, accumulated_trace)
+            return final_res
         except Exception as e:
             error_result = OrderSimResult(success=False, gas_used=0, coinbase_profit=0, blob_gas_used=0, paid_kickbacks=0, error=SimulationError.VALIDATION_ERROR, error_message=str(e))
             return self._convert_result_to_simulated_order(order, error_result)
@@ -106,28 +61,7 @@ class EVMSimulator:
     def simulate_and_commit_order(self, order: Order) -> SimulatedOrder:
         return self._simulate_single_order(order)
 
-    def _simulate_single_order(self, order: Order) -> SimulatedOrder:
-        if hasattr(order, 'order_type'):
-            otype = order.order_type()
-            if otype == OrderType.TX and isinstance(order, TxOrder):
-                return self.simulate_tx_order(order)
-            elif otype == OrderType.BUNDLE and isinstance(order, BundleOrder):
-                return self.simulate_bundle_order(order)
-            elif otype == OrderType.SHAREBUNDLE and hasattr(self, 'simulate_share_bundle_order'):
-                return self.simulate_share_bundle_order(order)
-            else:
-                error_message = f"Unknown or unsupported order type: {otype}"
-                logger.error(error_message)
-                error_result = OrderSimResult(success=False, gas_used=0, error=SimulationError.UNKNOWN_ERROR, error_message=error_message)
-                return self._convert_result_to_simulated_order(order, error_result)
-        else:
-            error_message = "Order does not have order_type method."
-            logger.error(error_message)
-            error_result = OrderSimResult(success=False, gas_used=0, error=SimulationError.UNKNOWN_ERROR, error_message=error_message)
-            return self._convert_result_to_simulated_order(order, error_result)
-
-    def _execute_tx(self, tx_data) -> OrderSimResult:
-        """Simulate a transaction execution."""
+    def _execute_tx(self, tx_data, accumulated_trace=None) -> OrderSimResult:
         try:
             tx = self._create_pyevm_tx(tx_data)
             header = self._create_block_header()
@@ -135,18 +69,26 @@ class EVMSimulator:
             coinbase_addr = self.context.coinbase
             initial_coinbase_balance = self.env.get_balance(coinbase_addr)
 
-            self.override_execution_context()  # Ensure execution context is set correctly
+            self._override_execution_context()  # Ensure execution context is set correctly
 
             # Start state tracing (patches EVM opcodes)
             self.state_tracer.start_tracing(tx)
 
-
-            # Apply the transaction with the header
             receipt, computation = self.env.evm.vm.apply_transaction(header, tx)
 
             # Finish state tracing and get the trace (pass tx for simple transfer handling)
-            state_trace = self.state_tracer.finish_tracing(computation, tx)
-            print(state_trace.summary())
+            tx_state_trace = self.state_tracer.finish_tracing(computation, tx)
+            
+            if accumulated_trace is not None:
+                final_trace = accumulated_trace.copy()
+                final_trace.append_trace(tx_state_trace)
+            else:
+                final_trace = tx_state_trace
+            
+            # with open("state_trace_pybuilder.txt", "a") as f:
+            #     f.write(f"Transaction 0x{tx.hash.hex()} state trace:\n")
+            #     f.write(final_trace.summary() + "\n")
+            
             # Clean up tracing (restore original opcodes)
             self.state_tracer.cleanup()
 
@@ -162,7 +104,7 @@ class EVMSimulator:
                 error=None,
                 error_message=None,
                 state_changes=None,
-                state_trace=state_trace
+                state_trace=final_trace
             )
 
         except Exception as e:
@@ -175,7 +117,7 @@ class EVMSimulator:
                 paid_kickbacks=0,
                 error=SimulationError.VALIDATION_ERROR,
                 error_message=str(e),
-                state_trace=None
+                state_trace=accumulated_trace  # Return accumulated trace even on failure
             )
 
 
@@ -234,29 +176,41 @@ class EVMSimulator:
             mix_hash=self.context.mix_hash, parent_beacon_block_root=self.context.parent_beacon_block_root,
         )
 
-    def fork_at_block(self, block_number: int):
+    def _fork_at_block(self, block_number: int):
         block_id = to_hex(block_number)
         self.env.fork_rpc(self.rpc, block_identifier=block_id)
 
-    def _fetch_recent_block_hashes(self, current_block: int):
+    def _fetch_prev_block_hashes(self, current_block: int):
+        """Fetch the previous 255 block hashes and store them for BLOCKHASH opcode."""
         w3 = web3.Web3(web3.Web3.HTTPProvider(self.rpc_url))
+        
         logger.info(f"Fetching recent block hashes for block {current_block}")
-        start_block = max(0, current_block - 255)
+        
+        # Fetch hashes for blocks [current_block - 256, current_block - 1]
+        # We already have the parent hash in our context
+        start_block = max(0, current_block - 256)
+        
         block_hashes = []
+        
         if current_block > 0:
             block_hashes.append(self._safe_to_bytes(self.context.parent_hash))
+        
         for block_num in range(current_block - 2, start_block - 1, -1):
-            if block_num < 0: break
+            if block_num < 0:
+                break
             try:
                 block = w3.eth.get_block(block_num)
                 block_hashes.append(self._safe_to_bytes(block['hash']))
             except Exception as e:
                 logger.warning(f"Failed to fetch block hash for block {block_num}: {e}")
+                # Set to zero hash if we can't fetch it
                 block_hashes.append(b'\x00' * 32)
-        self.recent_block_hashes = block_hashes
-        logger.info(f"Fetched {len(self.recent_block_hashes)} block hashes")
+        
+        self.prev_block_hashes = block_hashes
+        logger.info(f"Fetched {len(self.prev_block_hashes)} block hashes")
 
-    def override_execution_context(self):
+
+    def _override_execution_context(self):
         self.env.evm.vm.state.execution_context._base_fee_per_gas = self.context.block_base_fee
         self.env.evm.vm.state.execution_context._coinbase = self._safe_to_bytes(self.context.coinbase)
         self.env.evm.vm.state.execution_context._timestamp = self._safe_to_int(self.context.block_timestamp)
@@ -267,8 +221,9 @@ class EVMSimulator:
         if self.context.excess_blob_gas is not None:
             self.env.evm.vm.state.execution_context._excess_blob_gas = self._safe_to_int(self.context.excess_blob_gas)
         
-        # Set recent block hashes for BLOCKHASH opcode support
-        self.env.evm.vm.state.execution_context._prev_hashes = self.recent_block_hashes
+        # Set previous block hashes for BLOCKHASH opcode support
+        if self.prev_block_hashes:
+            self.env.evm.vm.state.execution_context._prev_hashes = self.prev_block_hashes
     
 
     def _convert_result_to_simulated_order(self, order: Order, result: OrderSimResult) -> SimulatedOrder:
@@ -286,22 +241,6 @@ class EVMSimulator:
 
     def _calculate_coinbase_profit(self, initial_balance: int, final_balance: int) -> int:
         return max(0, final_balance - initial_balance)
-
-    def _decode_revert_output(self, output_hex: str) -> str:
-        return self.decode_revert_reason(output_hex)
-
-    def decode_revert_reason(self, revert_data: str) -> str:
-        if not revert_data: return "No revert reason provided"
-        if revert_data.startswith('0x'): revert_data = revert_data[2:]
-        try:
-            data = bytes.fromhex(revert_data)
-            if len(data) >= 4 and data[:4] == bytes.fromhex('08c379a0'):
-                return decode(['string'], data[4:])[0]
-            else:
-                try: return data.decode('utf-8').strip('\x00')
-                except: return f"Custom error or non-string revert: {revert_data}"
-        except Exception as e:
-            return f"Failed to decode revert reason: {e}"
 
     def _safe_to_int(self, value: int | str | bytes) -> int:
         if not value: return 0
@@ -321,6 +260,76 @@ class EVMSimulator:
         else:
             return bytes(value)
 
+    def _simulate_single_order(self, order: Order, accumulated_trace=None) -> SimulatedOrder:
+        """
+        Simulate a single order with an optional accumulated trace from parent orders.
+        """
+        if hasattr(order, 'order_type'):
+            otype = order.order_type()
+            if otype == OrderType.TX and isinstance(order, TxOrder):
+                return self._simulate_tx_order(order, accumulated_trace)
+            elif otype == OrderType.BUNDLE and isinstance(order, BundleOrder):
+                return self._simulate_bundle_order(order, accumulated_trace)
+            elif otype == OrderType.SHAREBUNDLE and hasattr(self, '_simulate_share_bundle_order'):
+                return self._simulate_share_bundle_order(order, accumulated_trace)
+            else:
+                error_message = f"Unknown or unsupported order type: {otype}"
+                logger.error(error_message)
+                error_result = OrderSimResult(success=False, gas_used=0, error=SimulationError.UNKNOWN_ERROR, error_message=error_message)
+                return self._convert_result_to_simulated_order(order, error_result)
+        else:
+            error_message = "Order does not have order_type method."
+            logger.error(error_message)
+            error_result = OrderSimResult(success=False, gas_used=0, error=SimulationError.UNKNOWN_ERROR, error_message=error_message)
+            return self._convert_result_to_simulated_order(order, error_result)
+
+    def _simulate_tx_order(self, order: TxOrder, accumulated_trace=None) -> SimulatedOrder:
+        logger.info(f"Simulating transaction {order.id()} with accumulated trace")
+        try:
+            tx_data = order.get_transaction_data()
+            result = self._execute_tx(tx_data, accumulated_trace)
+            logger.info(f"Simulation result: {result.success}, gas used: {result.gas_used}, coinbase profit: {result.coinbase_profit}")
+            return self._convert_result_to_simulated_order(order, result)
+        except Exception as e:
+            logger.error(f"Failed to simulate tx order {getattr(order, 'id', lambda: '?')()}: {e}")
+            error_result = OrderSimResult(success=False, gas_used=0, error=SimulationError.VALIDATION_ERROR, error_message=str(e))
+            return self._convert_result_to_simulated_order(order, error_result)
+
+    def _simulate_bundle_order(self, order: BundleOrder, accumulated_trace=None) -> SimulatedOrder:
+        total_gas, total_profit = 0, 0
+        combined_trace = accumulated_trace.copy() if accumulated_trace else None
+        
+        for child_order, optional in order.child_orders:
+            res = self._execute_tx(child_order.get_transaction_data(), combined_trace)
+            if not res.success and not optional:
+                return self._convert_result_to_simulated_order(order, res)
+            if res.success:
+                total_gas += res.gas_used
+                total_profit += res.coinbase_profit
+                
+                if res.state_trace:
+                    if combined_trace is None:
+                        combined_trace = res.state_trace
+                    else:
+                        # The trace from _execute_tx already includes accumulated trace
+                        combined_trace = res.state_trace
+        
+        combined = OrderSimResult(
+            success=True, 
+            gas_used=total_gas, 
+            coinbase_profit=total_profit, 
+            blob_gas_used=0, 
+            paid_kickbacks=0, 
+            error=None, 
+            error_message=None, 
+            state_changes=None, 
+            state_trace=combined_trace
+        )
+        return self._convert_result_to_simulated_order(order, combined)
+
+    def _simulate_share_bundle_order(self, order: ShareBundleOrder, accumulated_trace=None) -> SimulatedOrder:
+        return self._simulate_bundle_order(order, accumulated_trace)
+
 def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[SimulatedOrder]:
     """
     Simulate orders using the provided EVM simulator instance.
@@ -334,8 +343,9 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
     """
     try:
 
-        # 1. Get initial on-chain nonces once.
-        on_chain_nonces = {addr: simulator.env.evm.vm.state.get_nonce(Address(addr).canonical_address) for order in orders for addr in {n.address for n in order.nonces()}}
+        # 1. Get initial on-chain nonces once
+        on_chain_nonces = {addr: simulator.env.evm.vm.state.get_nonce(Address(addr).canonical_address) 
+                           for order in orders for addr in {n.address for n in order.nonces()}}
 
         sim_tree = SimTree(on_chain_nonces)
         for order in orders:
@@ -343,24 +353,18 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
         
         sim_results_final: List[SimulatedOrder] = []
         
-        # 2. The main simulation loop.
+        # 2. The main simulation loop
         while True:
             sim_requests = sim_tree.pop_simulation_requests(limit=100)
             if not sim_requests:
-                break # No more ready orders to process.
+                break # No more ready orders to process
 
             for request in sim_requests:
-                if request.parents and len(request.parents) > 1:
-                    logger.info(f"Order {request.order.id()} has {len(request.parents)} parent orders")
-                    # Save order id to a file for debugging
-                    with open("sim_debug.txt", "a") as f:
-                        f.write(f"Order {request.order.id()} has {len(request.parents)} parents\n")
-
                 simulated_order = simulator.simulate_order_with_parents(request.order, request.parents)
                 sim_results_final.append(simulated_order) # Add result regardless of success
 
                 if simulated_order.simulation_result.success:
-                    # Create a result object and submit it to the tree to wake up other orders.
+                    # Create a result object and submit it to the tree to wake up other orders
                     nonces_after = [NonceKey(n.address, n.nonce + 1) for n in simulated_order.order.nonces()]
                     result_to_submit = SimulatedResult(
                         simulated_order=simulated_order,

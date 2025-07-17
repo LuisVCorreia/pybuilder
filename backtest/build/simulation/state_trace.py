@@ -1,17 +1,18 @@
 from typing import Dict, List, Set, Any
 from dataclasses import dataclass, field
+import copy
 
 @dataclass
 class SlotKey:
     """Key for identifying a storage slot"""
     address: str
-    slot: int
+    key: int
 
     def __hash__(self):
-        return hash((self.address, self.slot))
+        return hash((self.address, self.key))
 
     def __eq__(self, other):
-        return isinstance(other, SlotKey) and self.address == other.address and self.slot == other.slot
+        return isinstance(other, SlotKey) and self.address == other.address and self.key == other.key
 
 
 @dataclass
@@ -36,42 +37,60 @@ class UsedStateTrace:
     created_contracts: List[str] = field(default_factory=list)
     destructed_contracts: List[str] = field(default_factory=list)
 
+    def copy(self) -> 'UsedStateTrace':
+        """Creates a deep copy of this trace object."""
+        return UsedStateTrace(
+            read_slot_values=copy.copy(self.read_slot_values),
+            written_slot_values=copy.copy(self.written_slot_values),
+            read_balances=copy.copy(self.read_balances),
+            received_amount=copy.copy(self.received_amount),
+            sent_amount=copy.copy(self.sent_amount),
+            created_contracts=copy.copy(self.created_contracts),
+            destructed_contracts=copy.copy(self.destructed_contracts),
+        )
 
-    def merge(self, other: 'UsedStateTrace') -> 'UsedStateTrace':
-        """Merge another trace into this one (for bundle orders)"""
-        merged = UsedStateTrace()
-        
-        # Merge storage reads (first read wins)
-        merged.read_slot_values = {**self.read_slot_values, **other.read_slot_values}
-        # Merge storage writes (last write wins)  
-        merged.written_slot_values = {**self.written_slot_values, **other.written_slot_values}
-        
-        # Merge balance reads (first read wins)
-        merged.read_balances = {**self.read_balances, **other.read_balances}
-        
-        # Accumulate amounts
-        merged.received_amount = self._merge_amounts(self.received_amount, other.received_amount)
-        merged.sent_amount = self._merge_amounts(self.sent_amount, other.sent_amount)
-        
-        # Combine contract lists
-        merged.created_contracts = list(set(self.created_contracts + other.created_contracts))
-        merged.destructed_contracts = list(set(self.destructed_contracts + other.destructed_contracts))
-        
-        return merged
+    def append_trace(self, other: 'UsedStateTrace'):
+        """
+        Appends another trace into this one in-place.
+        Order matters: `other` trace is assumed to come after `self`.
+        - First read wins for storage and balances.
+        - Last write wins for storage.
+        - Amounts are accumulated.
+        - Contract lists are extended without duplicates.
+        """
+        # --- Storage Reads (First read wins) ---
+        for slot_key, value in other.read_slot_values.items():
+            if slot_key not in self.read_slot_values:
+                self.read_slot_values[slot_key] = value
 
-    def _merge_amounts(self, amounts1: Dict[str, int], amounts2: Dict[str, int]) -> Dict[str, int]:
-        """Helper to merge amount dictionaries by summing values"""
-        merged = amounts1.copy()
-        for addr, amount in amounts2.items():
-            merged[addr] = merged.get(addr, 0) + amount
-        return merged
+        # --- Storage Writes (Last write wins) ---
+        self.written_slot_values.update(other.written_slot_values)
+
+        # --- Balance Reads (First read wins) ---
+        for address, balance in other.read_balances.items():
+            if address not in self.read_balances:
+                self.read_balances[address] = balance
+
+        # --- Amount Accumulation ---
+        for address, amount in other.received_amount.items():
+            self.received_amount[address] = self.received_amount.get(address, 0) + amount
+        
+        for address, amount in other.sent_amount.items():
+            self.sent_amount[address] = self.sent_amount.get(address, 0) + amount
+
+        # --- Contract Lists (Extend without duplicates) ---
+        for address in other.created_contracts:
+            if address not in self.created_contracts:
+                self.created_contracts.append(address)
+        
+        for address in other.destructed_contracts:
+            if address not in self.destructed_contracts:
+                self.destructed_contracts.append(address)
 
     def conflicts_with(self, other: 'UsedStateTrace') -> bool:
         """Check if this trace conflicts with another (for MEV conflict detection)"""
         # Check for overlapping storage writes
-        written_keys = set(self.written_slot_values.keys())
-        other_written_keys = set(other.written_slot_values.keys())
-        if written_keys & other_written_keys:
+        if set(self.written_slot_values.keys()) & set(other.written_slot_values.keys()):
             return True
             
         # Check for overlapping balance changes
@@ -96,13 +115,12 @@ class UsedStateTrace:
         if self.read_slot_values:
             output_lines.append("\n[Read Slots]")
             for slot_key, value in self.read_slot_values.items():
-                # Format integers as hex for direct comparison with Rust's B256/U256 output
-                output_lines.append(f"  - Address: {slot_key.address}, Slot: {hex(slot_key.slot)}, Value: {hex(value)}")
+                output_lines.append(f"  - Address: {slot_key.address}, Slot: {hex(slot_key.key)}, Value: {hex(value)}")
 
         if self.written_slot_values:
             output_lines.append("\n[Written Slots]")
             for slot_key, value in self.written_slot_values.items():
-                output_lines.append(f"  - Address: {slot_key.address}, Slot: {hex(slot_key.slot)}, Value: {hex(value)}")
+                output_lines.append(f"  - Address: {slot_key.address}, Slot: {hex(slot_key.key)}, Value: {hex(value)}")
 
         if self.read_balances:
             output_lines.append("\n[Read Balances]")

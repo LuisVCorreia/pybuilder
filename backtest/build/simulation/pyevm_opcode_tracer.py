@@ -35,11 +35,12 @@ class SloadTracer:
         # Get slot from stack before calling original SLOAD
         slot = to_int(computation._stack.values[-1])
         
+        account = computation.msg.to
+        
         self.sload(computation)
         
         value = to_int(computation._stack.values[-1])
         
-        account = computation.msg.storage_address
         if account:
             addr_str = self._addr_to_hex(account)
             slot_key = SlotKey(addr_str, slot)
@@ -50,7 +51,15 @@ class SloadTracer:
     def _addr_to_hex(self, addr) -> str:
         if isinstance(addr, bytes):
             return '0x' + addr.hex().lower()
-        return str(addr).lower()
+        elif hasattr(addr, 'canonical_address'):
+            return '0x' + addr.canonical_address.hex().lower()
+        elif hasattr(addr, 'hex'):
+            return '0x' + addr.hex().lower()
+        else:
+            addr_str = str(addr).lower()
+            if not addr_str.startswith('0x'):
+                addr_str = '0x' + addr_str
+            return addr_str
 
 
 class SstoreTracer:
@@ -64,21 +73,38 @@ class SstoreTracer:
     def __call__(self, computation):
         # Get value and slot from stack before calling original SSTORE
         value, slot = [to_int(t) for t in computation._stack.values[-2:]]
+
+        account = computation.msg.to
         
-        # Execute original SSTORE
-        self.sstore(computation)
-        
-        account = computation.msg.storage_address
         if account:
             addr_str = self._addr_to_hex(account)
             slot_key = SlotKey(addr_str, slot)
+
+            # Check for same value write before executing SSTORE
+            initial_read_value = self.collector.trace.read_slot_values.get(slot_key)
             
+            if initial_read_value is not None and initial_read_value == value:
+                if slot_key in self.collector.trace.written_slot_values:
+                    del self.collector.trace.written_slot_values[slot_key]
+                # Execute the SSTORE but don't record it as a state change
+                self.sstore(computation)
+                return
+            
+            self.sstore(computation)
             self.collector.trace.written_slot_values[slot_key] = value
     
     def _addr_to_hex(self, addr) -> str:
         if isinstance(addr, bytes):
             return '0x' + addr.hex().lower()
-        return str(addr).lower()
+        elif hasattr(addr, 'canonical_address'):
+            return '0x' + addr.canonical_address.hex().lower()
+        elif hasattr(addr, 'hex'):
+            return '0x' + addr.hex().lower()
+        else:
+            addr_str = str(addr).lower()
+            if not addr_str.startswith('0x'):
+                addr_str = '0x' + addr_str
+            return addr_str
 
 
 class BalanceTracer:
@@ -250,7 +276,7 @@ def patch_evm_opcodes_for_tracing(computation_class, collector: StateTraceCollec
         opcodes[CREATE2] = Create2Tracer(opcodes[CREATE2], collector)
     
     computation_class.opcodes = opcodes
-    
+
     logger.debug(f"Patched {len([op for op in [SLOAD, SSTORE, BALANCE, SELFDESTRUCT, CREATE, CREATE2] if op in opcodes])} opcodes for state tracing")
 
 
@@ -265,7 +291,7 @@ def record_transaction_nonce(collector: StateTraceCollector, tx_sender: str, cur
     
     next_nonce = current_nonce + 1
     
-    # Record as slot 0 read/write (like rbuilder)
+    # Record as slot 0 read/write
     slot_key = SlotKey(addr_str, 0)
     collector.trace.read_slot_values[slot_key] = current_nonce
     collector.trace.written_slot_values[slot_key] = next_nonce

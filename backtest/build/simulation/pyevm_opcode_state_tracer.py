@@ -66,9 +66,8 @@ class PyEVMOpcodeStateTracer:
         """
         Complete tracing and return the collected state trace.
         """
+        trace = self.collector.get_trace()
         try:
-            trace = self.collector.get_trace()
-            
             # Additional processing from computation
             if computation:
                 self._process_computation_for_additional_info(computation, trace)
@@ -78,7 +77,7 @@ class PyEVMOpcodeStateTracer:
             
         except Exception as e:
             logger.error(f"Error during opcode-based state tracing: {e}")
-            return self.collector.get_trace()
+            return trace
     
     def cleanup(self) -> None:
         """
@@ -143,14 +142,12 @@ class PyEVMOpcodeStateTracer:
         try:
             if hasattr(computation, 'msg') and hasattr(computation.msg, 'value'):
                 value = computation.msg.value
-                print("computation.msg:", computation.msg)
-                if value > 0:
+                should_transfer_value = computation.msg.should_transfer_value
+
+                if should_transfer_value and value > 0:
                     # Get sender and receiver
                     sender = getattr(computation.msg, 'sender', None)
                     to = getattr(computation.msg, 'to', None)
-
-                    print(f"Extracting value transfer: {value} wei from {sender} to {to}")
-                    print("THe receiver is:", to)
                     
                     if sender:
                         sender_str = self._addr_to_hex(sender)
@@ -159,7 +156,7 @@ class PyEVMOpcodeStateTracer:
                     if to:
                         to_str = self._addr_to_hex(to)
                         trace.received_amount[to_str] = trace.received_amount.get(to_str, 0) + value
-                        
+
         except Exception as e:
             logger.debug(f"Error extracting message value transfers: {e}")
     
