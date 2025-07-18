@@ -1,3 +1,4 @@
+from decimal import Decimal
 import logging
 from typing import List
 import web3
@@ -229,11 +230,12 @@ class EVMSimulator:
         if result.success:
             sim_value = SimValue(
                 coinbase_profit=result.coinbase_profit, gas_used=result.gas_used,
-                blob_gas_used=result.blob_gas_used, paid_kickbacks=result.paid_kickbacks
+                blob_gas_used=result.blob_gas_used, paid_kickbacks=result.paid_kickbacks,
+                mev_gas_price=result.coinbase_profit / result.gas_used if result.gas_used > 0 else Decimal(0)
             )
             return SimulatedOrder(order=order, sim_value=sim_value, used_state_trace=result.state_trace)
         else:
-            sim_value = SimValue(coinbase_profit=0, gas_used=0, blob_gas_used=0, paid_kickbacks=0)
+            sim_value = SimValue(coinbase_profit=0, gas_used=0, blob_gas_used=0, mev_gas_price=0, paid_kickbacks=0)
             simulated_order = SimulatedOrder(order=order, sim_value=sim_value, used_state_trace=result.state_trace)
             simulated_order._error_result = result
             return simulated_order

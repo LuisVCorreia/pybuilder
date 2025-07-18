@@ -3,6 +3,7 @@ from typing import Dict, List, Any, Optional
 from enum import Enum
 from backtest.common.order import Order
 from .state_trace import UsedStateTrace
+from decimal import Decimal
 
 @dataclass
 class SimulationContext:
@@ -97,6 +98,7 @@ class SimValue:
     coinbase_profit: int  # in wei
     gas_used: int
     blob_gas_used: int
+    mev_gas_price: Decimal
     paid_kickbacks: int  # in wei
 
 

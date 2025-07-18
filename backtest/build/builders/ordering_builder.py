@@ -1,3 +1,4 @@
+from decimal import Decimal
 import logging
 import time
 from dataclasses import dataclass
@@ -144,6 +145,7 @@ class BlockBuildingHelper:
                 coinbase_profit=simulated_profit,
                 gas_used=simulated_gas,
                 blob_gas_used=simulated_blob_gas,
+                mev_gas_price=simulated_profit / simulated_gas if simulated_gas > 0 else Decimal(0),
                 paid_kickbacks=simulated_kickbacks
             )
             

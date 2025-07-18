@@ -99,25 +99,14 @@ class MevGasPricePriority(OrderPriority):
     """
     
     def priority_value(self) -> int:
-        """Calculate MEV gas price."""
-        if self.order.sim_value.gas_used == 0:
-            return 0
-        return self.order.sim_value.coinbase_profit // self.order.sim_value.gas_used
+        return self.order.sim_value.mev_gas_price
     
     @classmethod
     def simulation_too_low(cls, original_sim_value: SimValue, new_sim_value: SimValue) -> bool:
         """Check if MEV gas price dropped too much."""
-        original_price = cls._mev_gas_price(original_sim_value)
-        new_price = cls._mev_gas_price(new_sim_value)
+        original_price = original_sim_value.mev_gas_price
+        new_price = new_sim_value.mev_gas_price
         return MaxProfitPriority._new_sim_value_too_low(original_price, new_price)
-    
-    @staticmethod
-    def _mev_gas_price(sim_value: SimValue) -> int:
-        """Calculate MEV gas price from SimValue."""
-        if sim_value.gas_used == 0:
-            return 0
-        return sim_value.coinbase_profit // sim_value.gas_used
-
 
 class PrioritizedOrderStore:
     """
