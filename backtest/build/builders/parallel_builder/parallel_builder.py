@@ -45,6 +45,8 @@ class ParallelBuilder:
         
         try:
             logger.info(f"Starting parallel block building with {len(simulated_orders)} orders")
+
+            simulated_orders.sort(key=lambda o: o.order.id().value)
             
             # Step 1: Group orders by conflicts
             conflict_finder = ConflictFinder()
@@ -56,10 +58,10 @@ class ParallelBuilder:
             # Step 2: Generate tasks for each group
             task_queue = PriorityQueue()
             task_generator = ConflictTaskGenerator(task_queue)
-            task_generator.process_groups(conflict_groups)
-            
-            logger.info(f"Generated {task_queue.qsize()} tasks")
-            
+            num_tasks = task_generator.generate_tasks_for_groups(conflict_groups)
+
+            logger.info(f"Generated {num_tasks} tasks")
+
             # Step 3: Set up result aggregation
             best_results = BestResults()
             results_aggregator = ResultsAggregator(best_results)
@@ -100,45 +102,41 @@ class ParallelBuilder:
     def _resolve_conflicts_parallel(self, task_queue: PriorityQueue, evm_simulator: EVMSimulator, 
                                   results_aggregator: ResultsAggregator):
         """Resolve conflicts using parallel task execution."""
-        completed_tasks = 0
         total_tasks = task_queue.qsize()
         
+        # Collect all tasks first
+        tasks = []
+        while not task_queue.empty():
+            try:
+                tasks.append(task_queue.get_nowait())
+            except Empty:
+                break
+        
+        logger.info(f"Processing {len(tasks)} tasks with {self.config.num_threads} threads")
+        
         with ThreadPoolExecutor(max_workers=self.config.num_threads) as executor:
-            # Submit initial batch of tasks
-            futures_to_tasks = {}
+            # Submit all tasks
+            future_to_task = {}
+            for task in tasks:
+                conflict_resolver = ConflictResolver(evm_simulator)
+                future = executor.submit(conflict_resolver.resolve_conflict_task, task)
+                future_to_task[future] = task
             
-            while not task_queue.empty() or futures_to_tasks:
-                # Submit new tasks up to thread limit
-                while len(futures_to_tasks) < self.config.num_threads and not task_queue.empty():
-                    try:
-                        task = task_queue.get_nowait()
-                        conflict_resolver = ConflictResolver(evm_simulator)
-                        future = executor.submit(conflict_resolver.resolve_conflict_task, task)
-                        futures_to_tasks[future] = task
-                    except Empty:
-                        break
+            # Process results as they complete
+            completed_tasks = 0
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                completed_tasks += 1
                 
-                # Process completed tasks
-                if futures_to_tasks:
-                    # Wait for at least one task to complete
-                    completed_futures = []
-                    for future in as_completed(futures_to_tasks, timeout=1.0):
-                        completed_futures.append(future)
-                        break  # Process one at a time for better responsiveness
+                try:
+                    result = future.result()
+                    results_aggregator.update_result(task.group_idx, result, task.group)
                     
-                    for future in completed_futures:
-                        task = futures_to_tasks.pop(future)
-                        completed_tasks += 1
+                    if completed_tasks % 10 == 0:
+                        logger.debug(f"Completed {completed_tasks}/{total_tasks} tasks")
                         
-                        try:
-                            result = future.result()
-                            results_aggregator.update_result(task.group_idx, result, task.group)
-                            
-                            if completed_tasks % 10 == 0:
-                                logger.debug(f"Completed {completed_tasks}/{total_tasks} tasks")
-                                
-                        except Exception as e:
-                            logger.warning(f"Task failed for group {task.group_idx}: {e}")
+                except Exception as e:
+                    logger.warning(f"Task failed for group {task.group_idx}: {e}")
 
     def _log_group_stats(self, conflict_groups):
         """Log statistics about conflict groups."""
@@ -157,12 +155,6 @@ class ParallelBuilder:
         # log size of each group
         group_sizes = [len(g.orders) for g in conflict_groups]
         logger.info(f"Group sizes: {group_sizes}")
-        
-        # Log largest groups for debugging
-        large_groups = [g for g in conflict_groups if len(g.orders) > 3]
-        if large_groups:
-            for group in sorted(large_groups, key=lambda x: len(x.orders), reverse=True)[:5]:
-                logger.debug(f"Large group {group.id}: {len(group.orders)} orders")
 
 
 def run_parallel_builder(simulated_orders: List[SimulatedOrder], config: Dict, 

@@ -286,7 +286,7 @@ class OrderingBuilder:
             # Initialize block building helper with the shared simulator
             helper = BlockBuildingHelper(self.name, evm_simulator)
 
-            evm_simulator.fork_at_block(helper.context.block_number - 1)
+            evm_simulator._fork_at_block(helper.context.block_number - 1)
 
             # Main block building loop
             self._fill_orders(order_store, helper, failed_orders, order_attempts)

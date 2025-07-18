@@ -1,6 +1,6 @@
 from .parallel_builder import ParallelBuilder, ParallelBuilderConfig, run_parallel_builder
-from .task import ConflictTask, TaskPriority, Algorithm, ResolutionResult, ConflictGroup
-from .groups import ConflictFinder
+from .task import ConflictTask, TaskPriority, Algorithm, ResolutionResult
+from .groups import ConflictFinder, ConflictGroup
 from .results_aggregator import BestResults, ResultsAggregator
 from .block_assembler import BlockAssembler
 

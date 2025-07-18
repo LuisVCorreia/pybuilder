@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List, Tuple
 from functools import total_ordering
+import time
 from .groups import ConflictGroup
 
 @total_ordering
@@ -68,3 +69,62 @@ class ConflictTask:
             return NotImplemented
         return (self.priority == other.priority and 
                 abs(self.created_at - other.created_at) < 1e-9)
+
+# Constants matching rbuilder
+MAX_LENGTH_FOR_ALL_PERMUTATIONS = 3
+NUMBER_OF_RANDOM_TASKS = 50
+
+
+def get_tasks_for_group(group: ConflictGroup, priority: TaskPriority) -> List[ConflictTask]:
+    """Generate tasks for a conflict group - matches rbuilder's get_tasks_for_group."""
+    tasks = []
+    created_at = time.time()
+    
+    # Always run greedy first for quick decent results
+    tasks.append(ConflictTask(
+        group_idx=group.id,
+        algorithm=Algorithm.GREEDY,
+        priority=priority,
+        group=group,
+        created_at=created_at
+    ))
+    
+    # Add all permutations if small enough
+    if len(group.orders) <= MAX_LENGTH_FOR_ALL_PERMUTATIONS:
+        tasks.append(ConflictTask(
+            group_idx=group.id,
+            algorithm=Algorithm.ALL_PERMUTATIONS,
+            priority=priority,
+            group=group,
+            created_at=created_at
+        ))
+    else:
+        # Add reverse greedy for larger groups
+        tasks.append(ConflictTask(
+            group_idx=group.id,
+            algorithm=Algorithm.REVERSE_GREEDY,
+            priority=TaskPriority.LOW,
+            group=group,
+            created_at=created_at
+        ))
+        
+        # Add length-based algorithm
+        tasks.append(ConflictTask(
+            group_idx=group.id,
+            algorithm=Algorithm.LENGTH,
+            priority=TaskPriority.LOW,
+            group=group,
+            created_at=created_at
+        ))
+        
+        # Add random permutation tasks
+        tasks.append(ConflictTask(
+            group_idx=group.id,
+            algorithm=Algorithm.RANDOM,
+            priority=TaskPriority.LOW,
+            group=group,
+            created_at=created_at,
+            random_config=RandomConfig(seed=group.id, count=NUMBER_OF_RANDOM_TASKS)
+        ))
+    
+    return tasks

@@ -69,8 +69,6 @@ class EVMSimulator:
             coinbase_addr = self.context.coinbase
             initial_coinbase_balance = self.env.get_balance(coinbase_addr)
 
-            self._override_execution_context()  # Ensure execution context is set correctly
-
             # Start state tracing (patches EVM opcodes)
             self.state_tracer.start_tracing(tx)
 
@@ -179,6 +177,7 @@ class EVMSimulator:
     def _fork_at_block(self, block_number: int):
         block_id = to_hex(block_number)
         self.env.fork_rpc(self.rpc, block_identifier=block_id)
+        self._override_execution_context()  # Ensure execution context is set correctly
 
     def _fetch_prev_block_hashes(self, current_block: int):
         """Fetch the previous 255 block hashes and store them for BLOCKHASH opcode."""
@@ -284,7 +283,7 @@ class EVMSimulator:
             return self._convert_result_to_simulated_order(order, error_result)
 
     def _simulate_tx_order(self, order: TxOrder, accumulated_trace=None) -> SimulatedOrder:
-        logger.info(f"Simulating transaction {order.id()} with accumulated trace")
+        logger.info(f"Simulating transaction {order.id()}")
         try:
             tx_data = order.get_transaction_data()
             result = self._execute_tx(tx_data, accumulated_trace)
