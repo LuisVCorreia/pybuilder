@@ -61,17 +61,17 @@ class ConflictFinder:
             group_id = self.group_counter
             self.group_counter += 1
             self.groups[group_id] = new_order_group
-            self._add_group_to_index(group_id, new_order_group)
+            self._add_group_to_index(group_id, new_order_group, is_new_id=True)
 
         elif len(conflicting_group_ids) == 1:
             # One conflict: Merge the new order's group with the existing one under the same old ID
             group_id = conflicting_group_ids[0]
             other_group = self.groups.pop(group_id)
-            self._remove_group_from_index(group_id, other_group)
             
             combined_group = self._combine_groups([new_order_group, other_group])
             self.groups[group_id] = combined_group
-            self._add_group_to_index(group_id, combined_group)
+            # Re-index the combined group under the old ID. `is_new_id=False` prevents duplicates.
+            self._add_group_to_index(group_id, combined_group, is_new_id=False)
 
         else:
             # Multiple conflicts: Merge all conflicting groups and the new order's group under a new ID
@@ -90,7 +90,7 @@ class ConflictFinder:
             
             merged_data = self._combine_groups(groups_to_merge, removed_ids)
             self.groups[new_group_id] = merged_data
-            self._add_group_to_index(new_group_id, merged_data)
+            self._add_group_to_index(new_group_id, merged_data, is_new_id=True)
 
     def _find_all_conflicts(self, trace: UsedStateTrace) -> List[int]:
         """
@@ -144,7 +144,7 @@ class ConflictFinder:
         self.group_counter += 1
         group_data = self._create_group_data_from_order(order)
         self.groups[group_id] = group_data
-        self._add_group_to_index(group_id, group_data)
+        self._add_group_to_index(group_id, group_data, is_new_id=True)
 
     def _combine_groups(self, groups_to_merge: List['GroupData'], removed_group_ids: Set[int] = None) -> 'GroupData':
         """Combines multiple GroupData objects into one, merging their traces and orders."""
@@ -193,18 +193,28 @@ class ConflictFinder:
             code_writes=code_writes,
         )
 
-    def _add_group_to_index(self, group_id: int, group_data: 'GroupData'):
+    def _add_group_to_index(self, group_id: int, group_data: 'GroupData', is_new_id: bool):
         """Adds a group's trace data to the conflict detection indexes."""
         for slot_key in group_data.reads:
-            self.group_reads[slot_key.address][slot_key.key].append(group_id)
+            groups = self.group_reads[slot_key.address].setdefault(slot_key.key, [])
+            if is_new_id or group_id not in groups:
+                groups.append(group_id)
         for slot_key in group_data.writes:
-            self.group_writes[slot_key.address][slot_key.key].append(group_id)
+            groups = self.group_writes[slot_key.address].setdefault(slot_key.key, [])
+            if is_new_id or group_id not in groups:
+                groups.append(group_id)
         for address in group_data.balance_reads:
-            self.group_balance_reads[address].append(group_id)
+            groups = self.group_balance_reads.setdefault(address, [])
+            if is_new_id or group_id not in groups:
+                groups.append(group_id)
         for address in group_data.balance_writes:
-            self.group_balance_writes[address].append(group_id)
+            groups = self.group_balance_writes.setdefault(address, [])
+            if is_new_id or group_id not in groups:
+                groups.append(group_id)
         for address in group_data.code_writes:
-            self.group_code_writes[address].append(group_id)
+            groups = self.group_code_writes.setdefault(address, [])
+            if is_new_id or group_id not in groups:
+                groups.append(group_id)
 
     def _remove_group_from_index(self, group_id: int, group_data: 'GroupData'):
         """Removes a group's trace data from the indexes, typically before a merge."""
@@ -231,13 +241,15 @@ class ConflictFinder:
 
     def get_order_groups(self) -> List[ConflictGroup]:
         """Returns the current state of conflict groups in the required format."""
+        # The rbuilder implementation sorts by key here for deterministic output.
+        sorted_groups = sorted(self.groups.items())
         return [
             ConflictGroup(
                 id=group_id,
                 orders=group_data.orders,
                 conflicting_group_ids=group_data.conflicting_group_ids
             )
-            for group_id, group_data in self.groups.items()
+            for group_id, group_data in sorted_groups
         ]
 
 @dataclass
