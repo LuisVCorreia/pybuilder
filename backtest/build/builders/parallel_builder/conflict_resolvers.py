@@ -1,11 +1,13 @@
 import itertools
 import random
-from typing import List, Tuple, Dict, Optional
+from typing import List, Dict
 import logging
 
 from backtest.build.simulation.evm_simulator import EVMSimulator
 from backtest.build.simulation.sim_utils import SimulatedOrder
 from .task import ConflictTask, ResolutionResult, Algorithm
+from backtest.common.order import BundleOrder
+
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +70,8 @@ class ConflictResolver:
                 task.random_config.count
             )
         else:
-            # Default to greedy
-            return self._generate_greedy_sequences(orders, reverse=False)
+            logger.error(f"Unknown algorithm {task.algorithm}")
+            return []
 
     def _generate_greedy_sequences(self, orders: List[SimulatedOrder], reverse: bool) -> List[List[int]]:
         """Generate greedy sequences based on profit and MEV gas price."""
@@ -86,7 +88,7 @@ class ConflictResolver:
         # Sort by MEV gas price (profit per gas)
         mev_gas_price_indices = list(range(len(orders)))
         mev_gas_price_indices.sort(
-            key=lambda i: self._get_mev_gas_price(orders[i]),
+            key=lambda i: orders[i].sim_value.mev_gas_price,
             reverse=not reverse
         )
         sequences.append(mev_gas_price_indices)
@@ -94,23 +96,26 @@ class ConflictResolver:
         return sequences
 
     def _generate_length_based_sequences(self, orders: List[SimulatedOrder]) -> List[List[int]]:
-        """Generate sequences prioritizing by bundle length."""
-        sequences = []
-        
-        # Sort by number of transactions (longer bundles first)
-        length_indices = list(range(len(orders)))
-        length_indices.sort(
-            key=lambda i: self._get_order_length(orders[i]),
-            reverse=True
-        )
-        sequences.append(length_indices)
-        
-        # Also try reverse (shorter bundles first)
-        reverse_length = length_indices.copy()
-        reverse_length.reverse()
-        sequences.append(reverse_length)
-        
-        return sequences
+        """
+        Generate a sequence of order indices sorted by bundle length (descending),
+        with profit (descending) as a tie-breaker.
+        """
+        # Create a list of tuples containing the data needed for sorting:
+        # (original_index, order_length, order_profit)
+        order_data = [
+            (
+                idx,
+                self._get_order_length(orders[idx]),
+                orders[idx].sim_value.coinbase_profit
+            )
+            for idx in range(len(orders))
+        ]
+
+        order_data.sort(key=lambda x: (x[1], x[2]), reverse=True)
+
+        length_based_sequence = [item[0] for item in order_data]
+
+        return [length_based_sequence]
 
     def _generate_all_permutations(self, num_orders: int) -> List[List[int]]:
         """Generate all possible permutations."""
@@ -152,17 +157,10 @@ class ConflictResolver:
             logger.warning(f"Error simulating sequence {sequence}: {e}")
             return ResolutionResult(total_profit=0, sequence_of_orders=[])
 
-    def _get_mev_gas_price(self, order: SimulatedOrder) -> float:
-        """Calculate MEV gas price for an order."""
-        if order.sim_value.gas_used == 0:
-            return 0.0
-        return order.sim_value.coinbase_profit / order.sim_value.gas_used
-
     def _get_order_length(self, order: SimulatedOrder) -> int:
         """Get the length (number of transactions) in an order."""
         # For bundle orders, this would be the number of transactions
         # For simple orders, it's 1
-        from backtest.common.order import BundleOrder
         if isinstance(order.order, BundleOrder):
             return len(order.order.child_orders)
         return 1
