@@ -1,8 +1,9 @@
 from decimal import Decimal
 import logging
-from typing import List
+from typing import List, Optional
+from hexbytes import HexBytes
 import web3
-from eth_abi import decode
+import boa_ext
 
 from boa.vm.py_evm import Address
 from boa.rpc import EthereumRPC, to_hex
@@ -20,18 +21,15 @@ from .state_trace import UsedStateTrace
 
 logger = logging.getLogger(__name__)
 
-
 class EVMSimulator:
-    def __init__(self, simulation_context: SimulationContext, rpc_url: str):
+    def __init__(self, simulation_context: SimulationContext, rpc_url: str, fetch_prev_hashes: bool = True):
         self.context = simulation_context
         self.rpc = EthereumRPC(rpc_url)
         self.env = Env(fast_mode_enabled=True, fork_try_prefetch_state=True)
-        self.vm = self.env.evm.vm
         self.rpc_url = rpc_url
-        self.prev_block_hashes = []
+        self.state_tracer = PyEVMOpcodeStateTracer(self.env)  
         self._fork_at_block(self.context.block_number - 1)
-        self._fetch_prev_block_hashes(self.context.block_number)
-        self.state_tracer = PyEVMOpcodeStateTracer(self.env)       
+             
 
     def simulate_order_with_parents(self, order: Order, parent_orders: List[Order] = None) -> SimulatedOrder:
         parent_orders = parent_orders or []
@@ -180,37 +178,8 @@ class EVMSimulator:
         self.env.fork_rpc(self.rpc, block_identifier=block_id)
         self._override_execution_context()  # Ensure execution context is set correctly
 
-    def _fetch_prev_block_hashes(self, current_block: int):
-        """Fetch the previous 255 block hashes and store them for BLOCKHASH opcode."""
-        w3 = web3.Web3(web3.Web3.HTTPProvider(self.rpc_url))
-        
-        logger.info(f"Fetching recent block hashes for block {current_block}")
-        
-        # Fetch hashes for blocks [current_block - 256, current_block - 1]
-        # We already have the parent hash in our context
-        start_block = max(0, current_block - 256)
-        
-        block_hashes = []
-        
-        if current_block > 0:
-            block_hashes.append(self._safe_to_bytes(self.context.parent_hash))
-        
-        for block_num in range(current_block - 2, start_block - 1, -1):
-            if block_num < 0:
-                break
-            try:
-                block = w3.eth.get_block(block_num)
-                block_hashes.append(self._safe_to_bytes(block['hash']))
-            except Exception as e:
-                logger.warning(f"Failed to fetch block hash for block {block_num}: {e}")
-                # Set to zero hash if we can't fetch it
-                block_hashes.append(b'\x00' * 32)
-        
-        self.prev_block_hashes = block_hashes
-        logger.info(f"Fetched {len(self.prev_block_hashes)} block hashes")
-
-
     def _override_execution_context(self):
+        # Set execution context parameters based on the simulation context for the current block
         self.env.evm.vm.state.execution_context._base_fee_per_gas = self.context.block_base_fee
         self.env.evm.vm.state.execution_context._coinbase = self._safe_to_bytes(self.context.coinbase)
         self.env.evm.vm.state.execution_context._timestamp = self._safe_to_int(self.context.block_timestamp)
@@ -220,11 +189,8 @@ class EVMSimulator:
         
         if self.context.excess_blob_gas is not None:
             self.env.evm.vm.state.execution_context._excess_blob_gas = self._safe_to_int(self.context.excess_blob_gas)
-        
-        # Set previous block hashes for BLOCKHASH opcode support
-        if self.prev_block_hashes:
-            self.env.evm.vm.state.execution_context._prev_hashes = self.prev_block_hashes
-    
+
+        # prev_hashes and chain_id are handled by the patched titanoboa, so we do not set them here (this enables caching)
 
     def _convert_result_to_simulated_order(self, order: Order, result: OrderSimResult) -> SimulatedOrder:
         if result.success:
