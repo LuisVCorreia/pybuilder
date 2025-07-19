@@ -2,7 +2,7 @@ from typing import List
 from queue import PriorityQueue
 import logging
 
-from .task import ConflictTask, ConflictGroup, TaskPriority, get_tasks_for_group
+from .task import ConflictGroup, TaskPriority, get_tasks_for_group
 
 logger = logging.getLogger(__name__)
 

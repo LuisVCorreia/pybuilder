@@ -135,18 +135,63 @@ class ConflictResolver:
         return sequences
 
     def _simulate_sequence(self, orders: List[SimulatedOrder], sequence: List[int]) -> ResolutionResult:
-        """Simulate a specific sequence of orders."""
+        """
+        Simulate a specific sequence of orders by executing them in order on the EVM.
+        
+        1. Fork EVM state to clean state before each sequence
+        2. Execute orders sequentially using simulate_and_commit_order
+        3. Track nonce state and skip orders with nonce conflicts
+        4. Accumulate coinbase profits from successful orders
+        """
         try:
-            # For now, we'll use the individual order profits
-            # In a full implementation, we'd re-simulate the sequence to get accurate profits
-            total_profit = 0
+            # Fork to clean state before testing this sequence
+            self.evm_simulator._fork_at_block(self.evm_simulator.context.block_number - 1)
+            
+            # Extract initial nonces from all orders in the sequence
+            initial_nonces = self._extract_sequence_nonces(orders, sequence)
+            nonce_state = {nonce.address: nonce.nonce for nonce in initial_nonces}
+            
+            # Get initial coinbase balance
+            coinbase_addr = self.evm_simulator.context.coinbase
+            initial_coinbase_balance = self.evm_simulator.env.get_balance(coinbase_addr)
+            
             sequence_profits = []
             
+            # Execute orders in sequence
             for order_idx in sequence:
                 order = orders[order_idx]
-                profit = order.sim_value.coinbase_profit
-                total_profit += profit
-                sequence_profits.append((order_idx, profit))
+                
+                # Check if this order's nonces are valid
+                if not self._are_nonces_valid(order, nonce_state):
+                    logger.debug(f"Order {order_idx} has invalid nonces, skipping in sequence")
+                    sequence_profits.append((order_idx, 0))
+                    continue
+                
+                balance_before = self.evm_simulator.env.get_balance(coinbase_addr)
+                
+                try:
+                    simulated_order = self.evm_simulator.simulate_and_commit_order(order.order)
+                    
+                    if not simulated_order.sim_value.success:
+                        # Order failed - skip it and continue with sequence
+                        logger.debug(f"Order {order_idx} failed in sequence simulation")
+                        sequence_profits.append((order_idx, 0))
+                        continue
+                        
+                    balance_after = self.evm_simulator.env.get_balance(coinbase_addr)
+                    order_profit = max(0, balance_after - balance_before)
+                    
+                    sequence_profits.append((order_idx, order_profit))
+                    
+                    self._update_nonce_state(order, nonce_state)
+                
+                except Exception as order_error:
+                    logger.debug(f"Error executing order {order_idx} in sequence: {order_error}")
+                    sequence_profits.append((order_idx, 0))
+                    continue
+            
+            final_coinbase_balance = self.evm_simulator.env.get_balance(coinbase_addr)
+            total_profit = max(0, final_coinbase_balance - initial_coinbase_balance)
             
             return ResolutionResult(
                 total_profit=total_profit,
@@ -156,6 +201,55 @@ class ConflictResolver:
         except Exception as e:
             logger.warning(f"Error simulating sequence {sequence}: {e}")
             return ResolutionResult(total_profit=0, sequence_of_orders=[])
+
+    def _extract_sequence_nonces(self, orders: List[SimulatedOrder], sequence: List[int]) -> List:
+        """
+        Extract initial nonce state for orders in the sequence.
+        Similar to ordering builder's _extract_initial_nonces.
+        """
+        from backtest.common.order import TxNonce
+        
+        account_nonces = {}
+        
+        # Find the minimum nonce for each account across orders in sequence
+        for order_idx in sequence:
+            order = orders[order_idx]
+            for nonce_info in order.order.nonces():
+                account = nonce_info.address
+                nonce = nonce_info.nonce
+                
+                if account not in account_nonces or nonce < account_nonces[account]:
+                    account_nonces[account] = nonce
+        
+        initial_nonces = []
+        for account, nonce in account_nonces.items():
+            initial_nonces.append(TxNonce(address=account, nonce=nonce, optional=False))
+        
+        return initial_nonces
+
+    def _are_nonces_valid(self, order: SimulatedOrder, nonce_state: Dict[str, int]) -> bool:
+        """
+        Check if an order's nonces are valid given the current nonce state.
+        """
+        for nonce_info in order.order.nonces():
+            if not nonce_info.optional:
+                expected_nonce = nonce_state.get(nonce_info.address, nonce_info.nonce)
+                if nonce_info.nonce < expected_nonce:
+                    # Nonce too low - order already used
+                    return False
+                elif nonce_info.nonce > expected_nonce:
+                    # Nonce too high - there's a gap, order can't execute yet
+                    return False
+        return True
+
+    def _update_nonce_state(self, order: SimulatedOrder, nonce_state: Dict[str, int]) -> None:
+        """
+        Update nonce state after successfully executing an order.
+        """
+        for nonce_info in order.order.nonces():
+            if not nonce_info.optional:
+                # Increment the nonce for this account
+                nonce_state[nonce_info.address] = nonce_info.nonce + 1
 
     def _get_order_length(self, order: SimulatedOrder) -> int:
         """Get the length (number of transactions) in an order."""

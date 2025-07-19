@@ -27,6 +27,7 @@ def apply_patches():
         if _ALREADY_PATCHED:
             return
         _patch_sqlite_cache()
+        _patch_caching_rpc_new()
         _patch_fetch_uncached()
         _patch_account_db_fork()
         _patch_pyevm_fork_rpc()
@@ -37,23 +38,43 @@ def _patch_sqlite_cache():
     if not THREADSAFE_CACHE:
         return
 
-    # Keep one SqliteCache instance per absolute path (NOT a single global)
+    # Keep one SqliteCache per (path, thread), not just per path.
     instances = {}
     orig_create = SqliteCache.create
 
-    def create_per_path(cls, db_path, *a, **k):
-        key = str(Path(db_path).resolve())
+    def create_per_path_thread(cls, db_path, *a, **k):
+        p = str(Path(db_path).resolve())
+        tid = threading.get_ident()
+        key = (p, tid)
         inst = instances.get(key)
         if inst is None:
             inst = cls.__new__(cls)
-            # invoke original __init__
-            cls.__init__(inst, db_path, *a, **k) 
+            cls.__init__(inst, p, *a, **k)  # new sqlite3.Connection in this thread
             instances[key] = inst
         return inst
 
-    SqliteCache.create = classmethod(create_per_path)
-    # TODO: Keep a reference in case we ever need the original?
+    SqliteCache.create = classmethod(create_per_path_thread)
     SqliteCache._boa_ext_original_create = orig_create
+
+def _patch_caching_rpc_new():
+    orig_new = CachingRPC.__new__
+    def new(cls, rpc, chain_id, debug):
+        import threading
+        thread_id = threading.get_ident()
+        # replicate original but add thread id
+        if isinstance(rpc, cls) and rpc._chain_id == chain_id:
+            return rpc
+
+        if (rpc.identifier, chain_id, thread_id) in cls._loaded:
+            return cls._loaded[(rpc.identifier, chain_id, thread_id)]
+
+        ret = super(CachingRPC, cls).__new__(cls)
+        ret.__init__(rpc, chain_id, debug)
+        cls._loaded[(rpc.identifier, chain_id, thread_id)] = ret
+        return ret
+    CachingRPC.__new__ = new
+
+
 
 def _patch_fetch_uncached():
     def _redirect(self: RPC, method: str, params):
