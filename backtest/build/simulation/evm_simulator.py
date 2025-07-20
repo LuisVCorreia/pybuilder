@@ -28,13 +28,17 @@ class EVMSimulator:
         self.env = Env(fast_mode_enabled=True, fork_try_prefetch_state=True)
         self.rpc_url = rpc_url
         self.state_tracer = PyEVMOpcodeStateTracer(self.env)  
-        self._fork_at_block(self.context.block_number - 1)
-             
+        self.fork_at_block(self.context.block_number - 1)
+
+    def fork_at_block(self, block_number: int):
+        block_id = to_hex(block_number)
+        self.env.fork_rpc(self.rpc, block_identifier=block_id)
+        self._override_execution_context()  # Ensure execution context is set correctly
 
     def simulate_order_with_parents(self, order: Order, parent_orders: List[Order] = None) -> SimulatedOrder:
         parent_orders = parent_orders or []
         try:
-            self._fork_at_block(self.context.block_number - 1)
+            self.fork_at_block(self.context.block_number - 1)
             
             accumulated_trace = UsedStateTrace()
             
@@ -172,11 +176,6 @@ class EVMSimulator:
             gas_used=0, excess_blob_gas=self.context.excess_blob_gas, receipt_root=self.context.receipt_root,
             mix_hash=self.context.mix_hash, parent_beacon_block_root=self.context.parent_beacon_block_root,
         )
-
-    def _fork_at_block(self, block_number: int):
-        block_id = to_hex(block_number)
-        self.env.fork_rpc(self.rpc, block_identifier=block_id)
-        self._override_execution_context()  # Ensure execution context is set correctly
 
     def _override_execution_context(self):
         # Set execution context parameters based on the simulation context for the current block

@@ -82,15 +82,15 @@ class ParallelBuilder:
             logger.info("Found %d conflict groups", len(conflict_groups))
             self._log_group_stats(conflict_groups)
 
-            # Step 2: Create tasks
-            task_queue = PriorityQueue()
-            task_generator = ConflictTaskGenerator(task_queue)
-            num_tasks = task_generator.generate_tasks_for_groups(conflict_groups)
-            logger.info("Generated %d tasks", num_tasks)
-
-            # Step 3: Aggregators
+            # Step 2: Aggregators
             best_results = BestResults()
             results_aggregator = ResultsAggregator(best_results)
+
+            # Step 3: Create tasks
+            task_queue = PriorityQueue()
+            task_generator = ConflictTaskGenerator(task_queue, results_aggregator)
+            num_tasks = task_generator.generate_tasks_for_groups(conflict_groups)
+            logger.info("Generated %d tasks", num_tasks)
 
             # Step 4: Parallel resolution
             self._resolve_conflicts_parallel(
@@ -102,6 +102,16 @@ class ParallelBuilder:
             # Step 5: Assemble block
             current_results = results_aggregator.get_current_best_results()
             block_assembler = BlockAssembler(self.builder_name)
+            # Step 4: Parallel resolution
+            self._resolve_conflicts_parallel(
+                task_queue,
+                evm_simulator,
+                results_aggregator
+            )
+
+            # Step 5: Assemble block
+            current_results = results_aggregator.get_current_best_results()
+            block_assembler = BlockAssembler(evm_simulator, self.builder_name)
             block_result = block_assembler.assemble_block(current_results)
 
             elapsed_ms = (time.time() - start_time) * 1000

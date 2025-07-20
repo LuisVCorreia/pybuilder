@@ -142,7 +142,7 @@ class ConflictResolver:
         """
         try:
             # Start from clean base for this permutation
-            self.evm_simulator._fork_at_block(self.evm_simulator.context.block_number - 1)
+            self.evm_simulator.fork_at_block(self.evm_simulator.context.block_number - 1)
 
             # Gather initial nonces from chain for all involved (non-optional) addresses
             referenced_addresses = set()

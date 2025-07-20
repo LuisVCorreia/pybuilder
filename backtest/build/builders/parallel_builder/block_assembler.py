@@ -1,101 +1,91 @@
-from typing import List, Tuple
 import logging
+from typing import List, Tuple
 
 from backtest.build.simulation.sim_utils import SimulatedOrder
-from backtest.build.builders.block_result import BlockResult, BlockTrace
+from backtest.build.simulation.evm_simulator import EVMSimulator
+from backtest.build.builders.block_result import BlockResult
 from .task import ResolutionResult, ConflictGroup
+from backtest.build.builders.block_building_helper import BlockBuildingHelper
 
 logger = logging.getLogger(__name__)
 
 
 class BlockAssembler:
-    """Assembles final blocks from best conflict resolution results."""
-    
-    def __init__(self, builder_name: str = "parallel"):
+    """
+    Assembles the final block for the parallel builder:
+      - Takes best (ResolutionResult, ConflictGroup) pairs.
+      - Reconstructs the winning per-group order sequences.
+      - Concatenates them (groups sorted by descending profit).
+      - Re-simulates / commits each order sequentially in a single EVM context
+        via BlockBuildingHelper.
+    """
+
+    def __init__(self, evm_simulator: EVMSimulator, builder_name: str = "parallel"):
+        self.simulator = evm_simulator
         self.builder_name = builder_name
 
-    def assemble_block(self, best_results: List[Tuple[ResolutionResult, ConflictGroup]]) -> BlockResult:
-        """Assemble a block from the best results of each conflict group."""
-        try:
-            if not best_results:
-                return BlockResult(
-                    builder_name=self.builder_name,
-                    success=False,
-                    error_message="No results to assemble"
-                )
+    def assemble_block(
+        self,
+        best_results: List[Tuple[ResolutionResult, ConflictGroup]]
+    ) -> BlockResult:
+        """
+        Build and finalize the block from best group resolutions.
 
-            # Collect all orders in optimal sequence from each group
-            all_orders = []
-            total_profit = 0
-            total_gas_used = 0
-            
-            for result, group in best_results:
-                # Add orders from this group in the optimal sequence
-                group_orders = self._extract_orders_from_result(result, group)
-                all_orders.extend(group_orders)
-                total_profit += result.total_profit
-                total_gas_used += sum(order.sim_value.gas_used for order in group_orders)
-
-            # Create block trace
-            block_trace = BlockTrace(
-                bid_value=total_profit,  # True bid value
-                gas_used=total_gas_used,
-                gas_limit=30_000_000,  # Standard block gas limit
-                blob_gas_used=0,
-                num_orders=len(all_orders),
-                orders_closed_at=0.0,  # Will be set by caller
-                fill_time_ms=0.0,      # Will be set by caller
-                raw_coinbase_profit=total_profit,
-                payout_gas_cost=0      # Simplified for now
-            )
-
-            logger.info(
-                f"Assembled block with {len(all_orders)} orders, "
-                f"profit: {total_profit / 1e18:.6f} ETH, "
-                f"gas: {total_gas_used:,}"
-            )
-
-            return BlockResult(
-                builder_name=self.builder_name,
-                success=True,
-                block_trace=block_trace,
-                included_orders=all_orders
-            )
-
-        except Exception as e:
-            logger.error(f"Error assembling block: {e}")
+        Args:
+            best_results: List of (ResolutionResult, ConflictGroup) pairs.
+        """
+        if not best_results:
             return BlockResult(
                 builder_name=self.builder_name,
                 success=False,
-                error_message=str(e)
+                error_message="No results to assemble"
             )
 
-    def _extract_orders_from_result(self, result: ResolutionResult, group: ConflictGroup) -> List[SimulatedOrder]:
-        """Extract orders from a resolution result in the optimal sequence."""
-        orders = []
-        
-        # Sort by the sequence specified in the result
-        for order_idx, _ in result.sequence_of_orders:
-            if order_idx < len(group.orders):
-                orders.append(group.orders[order_idx])
-            else:
-                logger.warning(f"Invalid order index {order_idx} in group of size {len(group.orders)}")
-        
-        return orders
+        # Sort groups by descending total profit
+        best_results.sort(key=lambda res: res[0].total_profit, reverse=True)
 
-    def _validate_results(self, best_results: List[Tuple[ResolutionResult, ConflictGroup]]) -> bool:
-        """Validate that results are consistent and don't conflict."""
-        # Check for conflicts between groups (shouldn't happen if grouping worked correctly)
-        all_used_addresses = set()
-        
+        helper = BlockBuildingHelper(self.builder_name, self.simulator)
+        self.simulator.fork_at_block(self.simulator.context.block_number - 1)
+
+        # Reconstruct full final execution ordering
+        final_order_sequence: List[SimulatedOrder] = []
         for result, group in best_results:
-            for order in group.orders:
-                if order.used_state_trace:
-                    # Check for storage conflicts
-                    written_slots = set(order.used_state_trace.written_slot_values.keys())
-                    if written_slots & all_used_addresses:
-                        logger.warning("Detected potential conflict between groups")
-                        return False
-                    all_used_addresses.update(written_slots)
-        
-        return True
+            group_orders = self._orders_from_result(result, group)
+            if not group_orders:
+                continue
+            final_order_sequence.extend(group_orders)
+
+        # Commit orders sequentially
+        for order in final_order_sequence:
+            try:
+                helper.commit_order(order)
+            except Exception as e:
+                logger.error(
+                    "Unexpected exception committing order %s: %s",
+                    order.order.id(), e,
+                    exc_info=True
+                )
+
+        # Finalize block result using helper
+        return helper.finalize_block()
+
+    def _orders_from_result(
+        self,
+        result: ResolutionResult,
+        group: ConflictGroup
+    ) -> List[SimulatedOrder]:
+        """
+        Map (local_index, profit) entries from resolution result
+        back to the group's SimulatedOrder objects in that local order.
+        Only include those that were actually attempted/executed in the sequence_of_orders.
+        """
+        orders: List[SimulatedOrder] = []
+        for local_idx, _ in result.sequence_of_orders:
+            if 0 <= local_idx < len(group.orders):
+                orders.append(group.orders[local_idx])
+            else:
+                logger.warning(
+                    "Resolution result references invalid order index %d (group size %d)",
+                    local_idx, len(group.orders)
+                )
+        return orders
