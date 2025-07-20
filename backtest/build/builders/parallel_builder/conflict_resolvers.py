@@ -3,6 +3,8 @@ import random
 from typing import List, Dict
 import logging
 
+from boa.vm.py_evm import Address
+
 from backtest.build.simulation.evm_simulator import EVMSimulator
 from backtest.build.simulation.sim_utils import SimulatedOrder
 from .task import ConflictTask, ResolutionResult, Algorithm
@@ -21,14 +23,6 @@ class ConflictResolver:
 
     def resolve_conflict_task(self, task: ConflictTask) -> ResolutionResult:
         """Resolve a conflict task and return the best ordering found."""
-        if len(task.group.orders) == 1:
-            # Single order - trivial case
-            order = task.group.orders[0]
-            return ResolutionResult(
-                total_profit=order.sim_value.coinbase_profit,
-                sequence_of_orders=[(0, order.sim_value.coinbase_profit)]
-            )
-        
         # Generate sequences to try based on algorithm
         sequences_to_try = self._generate_sequences_to_try(task)
         
@@ -136,71 +130,109 @@ class ConflictResolver:
 
     def _simulate_sequence(self, orders: List[SimulatedOrder], sequence: List[int]) -> ResolutionResult:
         """
-        Simulate a specific sequence of orders by executing them in order on the EVM.
-        
-        1. Fork EVM state to clean state before each sequence
-        2. Execute orders sequentially using simulate_and_commit_order
-        3. Track nonce state and skip orders with nonce conflicts
-        4. Accumulate coinbase profits from successful orders
+        Simulate a sequence of orders honoring nonce dependencies.
+
+        Rules:
+        - Defer orders whose required nonces are not yet met (nonce gap) -> pending_orders.
+        - Execute ready orders immediately.
+        - If simulate_and_commit_order returns success=True, ALWAYS advance the nonces of its
+            non-optional tx senders, even if coinbase profit is zero (revert or neutral effect).
+        - A simulator exception counts as a failed attempt: record zero profit, do NOT advance nonce.
+        - Only orders that were actually executed (attempted) are recorded in sequence_of_orders.
         """
         try:
-            # Fork to clean state before testing this sequence
+            # Start from clean base for this permutation
             self.evm_simulator._fork_at_block(self.evm_simulator.context.block_number - 1)
-            
-            # Extract initial nonces from all orders in the sequence
-            initial_nonces = self._extract_sequence_nonces(orders, sequence)
-            nonce_state = {nonce.address: nonce.nonce for nonce in initial_nonces}
-            
-            # Get initial coinbase balance
-            coinbase_addr = self.evm_simulator.context.coinbase
-            initial_coinbase_balance = self.evm_simulator.env.get_balance(coinbase_addr)
-            
-            sequence_profits = []
-            
-            # Execute orders in sequence
-            for order_idx in sequence:
+
+            # Gather initial nonces from chain for all involved (non-optional) addresses
+            referenced_addresses = set()
+            for idx in sequence:
+                for nonce_info in orders[idx].order.nonces():
+                    if not getattr(nonce_info, "optional", False):
+                        referenced_addresses.add(nonce_info.address)
+
+            from boa.vm.py_evm import Address
+            nonce_state: Dict[str, int] = {
+                addr: self.evm_simulator.env.evm.vm.state.get_nonce(Address(addr).canonical_address)
+                for addr in referenced_addresses
+            }
+
+            # Use stack for remaining order indices (reverse the given sequence)
+            remaining_orders = list(sequence)[::-1]
+            pending_orders: List[int] = []
+
+            sequence_profits: List[tuple[int, int]] = []
+            total_profit = 0
+
+            while remaining_orders:
+                order_idx = remaining_orders.pop()
                 order = orders[order_idx]
-                
-                # Check if this order's nonces are valid
+
+                # If nonces not ready, defer
                 if not self._are_nonces_valid(order, nonce_state):
-                    logger.debug(f"Order {order_idx} has invalid nonces, skipping in sequence")
-                    sequence_profits.append((order_idx, 0))
+                    pending_orders.append(order_idx)
                     continue
-                
-                balance_before = self.evm_simulator.env.get_balance(coinbase_addr)
-                
+
+                # Execute
                 try:
                     simulated_order = self.evm_simulator.simulate_and_commit_order(order.order)
-                    
-                    if not simulated_order.sim_value.success:
-                        # Order failed - skip it and continue with sequence
-                        logger.debug(f"Order {order_idx} failed in sequence simulation")
-                        sequence_profits.append((order_idx, 0))
-                        continue
-                        
-                    balance_after = self.evm_simulator.env.get_balance(coinbase_addr)
-                    order_profit = max(0, balance_after - balance_before)
-                    
-                    sequence_profits.append((order_idx, order_profit))
-                    
-                    self._update_nonce_state(order, nonce_state)
-                
-                except Exception as order_error:
-                    logger.debug(f"Error executing order {order_idx} in sequence: {order_error}")
+                except Exception as exc:
+                    logger.warning(f"Simulator exception executing order {order_idx}: {exc}")
+                    # Record attempt with zero profit; no nonce advance
                     sequence_profits.append((order_idx, 0))
                     continue
-            
-            final_coinbase_balance = self.evm_simulator.env.get_balance(coinbase_addr)
-            total_profit = max(0, final_coinbase_balance - initial_coinbase_balance)
-            
+
+                # Extract profit (may be zero)
+                order_profit = simulated_order.sim_value.coinbase_profit
+                sequence_profits.append((order_idx, order_profit))
+
+                if not simulated_order._error_result:
+                    # Count profit (only positive adds to total_profit)
+                    if order_profit > 0:
+                        total_profit += order_profit
+
+                    # Advance nonces for all non-optional nonce slots
+                    updated_accounts = set()
+                    for nonce_info in order.order.nonces():
+                        if getattr(nonce_info, "optional", False):
+                            continue
+                        expected = nonce_state.get(nonce_info.address, nonce_info.nonce)
+                        # expected should normally equal nonce_info.nonce
+                        if nonce_info.nonce == expected:
+                            nonce_state[nonce_info.address] = nonce_info.nonce + 1
+                        else:
+                            # Maintain monotonicity if off
+                            nonce_state[nonce_info.address] = max(expected, nonce_info.nonce + 1)
+                        updated_accounts.add(nonce_info.address)
+
+                    # Re-check pending orders for unlock
+                    if pending_orders:
+                        still_pending = []
+                        for p_idx in pending_orders:
+                            p_order = orders[p_idx]
+                            if self._are_nonces_valid(p_order, nonce_state):
+                                remaining_orders.append(p_idx)
+                            else:
+                                still_pending.append(p_idx)
+                        pending_orders = still_pending
+                else:
+                    # success == False should not happen per upstream invariant;
+                    # if it does, treat like failed validation: no nonce advance.
+                    logger.warning(f"Unexpected validation failure for order {order_idx} (not advancing nonce).")
+
+            # By invariant, pending_orders should be empty now
+            if pending_orders:
+                logger.warning("Unexpected leftover pending orders after simulation: %s", pending_orders)
+
             return ResolutionResult(
                 total_profit=total_profit,
                 sequence_of_orders=sequence_profits
             )
-            
+
         except Exception as e:
-            logger.warning(f"Error simulating sequence {sequence}: {e}")
+            logger.warning(f"Error simulating sequence {sequence}: {e}", exc_info=True)
             return ResolutionResult(total_profit=0, sequence_of_orders=[])
+
 
     def _extract_sequence_nonces(self, orders: List[SimulatedOrder], sequence: List[int]) -> List:
         """
