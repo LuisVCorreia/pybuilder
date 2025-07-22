@@ -59,7 +59,7 @@ class OrderingBuilder:
         self.config = config
         self.name = name
         self.priority_class = create_priority_class(config.sorting)
-        logger.info(f"Created {name} with sorting: {config.sorting.value}")
+        logger.debug(f"Created {name} with sorting: {config.sorting.value}")
     
     def build_block(
         self,
@@ -94,8 +94,6 @@ class OrderingBuilder:
                 f"Building block with {len(valid_orders)} orders "
                 f"({len(simulated_orders) - len(valid_orders)} filtered) using {self.name}"
             )
-            
-            logger.info(f"Using in-block simulation with titanoboa (reusing simulator)")
             
             # Initialize block building helper with the shared simulator
             helper = BlockBuildingHelper(self.name, evm_simulator)

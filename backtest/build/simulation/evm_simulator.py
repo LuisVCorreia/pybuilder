@@ -39,9 +39,8 @@ class EVMSimulator:
         parent_orders = parent_orders or []
         try:
             self.fork_at_block(self.context.block_number - 1)
-            
             accumulated_trace = UsedStateTrace()
-            
+                
             # Simulate parent orders and accumulate their traces
             for parent_order in parent_orders:
                 parent_res = self._simulate_single_order(parent_order, accumulated_trace)
@@ -250,11 +249,11 @@ class EVMSimulator:
             return self._convert_result_to_simulated_order(order, error_result)
 
     def _simulate_tx_order(self, order: TxOrder, accumulated_trace=None) -> SimulatedOrder:
-        logger.info(f"Simulating transaction {order.id()}")
+        logger.debug(f"Simulating transaction {order.id()}")
         try:
             tx_data = order.get_transaction_data()
             result = self._execute_tx(tx_data, accumulated_trace)
-            logger.info(f"Simulation result: {result.success}, gas used: {result.gas_used}, coinbase profit: {result.coinbase_profit}")
+            logger.debug(f"Simulation result: {result.success}, gas used: {result.gas_used}, coinbase profit: {result.coinbase_profit}")
             return self._convert_result_to_simulated_order(order, result)
         except Exception as e:
             logger.error(f"Failed to simulate tx order {getattr(order, 'id', lambda: '?')()}: {e}")
@@ -351,7 +350,7 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
         # Log summary
         successful = sum(1 for r in sim_results_final if r.simulation_result.success)
         failed = len(sim_results_final) - successful
-        logger.info(f"Block {simulator.context.block_number} simulation completed: {successful} successful, {failed} failed")
+        logger.debug(f"Block {simulator.context.block_number} simulation completed: {successful} successful, {failed} failed")
 
         return sim_results_final
 

@@ -72,7 +72,7 @@ class ConflictTask:
 
 # Constants matching rbuilder
 MAX_LENGTH_FOR_ALL_PERMUTATIONS = 3
-NUMBER_OF_RANDOM_TASKS = 50
+NUMBER_OF_RANDOM_TASKS = 10  # Note: rbuilder uses 50
 
 
 def get_tasks_for_group(group: ConflictGroup, priority: TaskPriority) -> List[ConflictTask]:

@@ -37,5 +37,5 @@ class ConflictTaskGenerator:
                 self.task_queue.put(task)
                 total_tasks += 1
         
-        logger.info(f"Generated {total_tasks} tasks for {len(conflict_groups)} conflict groups")
+        logger.debug(f"Generated {total_tasks} tasks for {len(conflict_groups)} conflict groups")
         return total_tasks
