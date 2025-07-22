@@ -90,8 +90,10 @@ class SstoreTracer:
                 self.sstore(computation)
                 return
             
-            self.sstore(computation)
             self.collector.trace.written_slot_values[slot_key] = value
+
+        self.sstore(computation)
+
     
     def _addr_to_hex(self, addr) -> str:
         if isinstance(addr, bytes):
