@@ -17,7 +17,10 @@ class ConflictTaskGenerator:
     def generate_tasks_for_groups(self, conflict_groups: List[ConflictGroup]):
         """Generate and queue tasks for all conflict groups."""
         total_tasks = 0
-        
+
+        # Process larger groups first
+        conflict_groups.sort(key=lambda g: len(g.orders), reverse=True)
+
         for group in conflict_groups:
             if len(group.orders) == 1:
                 # No need to create tasks for single order groups, send to results aggregator
@@ -36,6 +39,5 @@ class ConflictTaskGenerator:
             for task in tasks:
                 self.task_queue.put(task)
                 total_tasks += 1
-        
         logger.debug(f"Generated {total_tasks} tasks for {len(conflict_groups)} conflict groups")
         return total_tasks

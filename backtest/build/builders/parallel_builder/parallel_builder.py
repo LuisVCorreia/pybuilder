@@ -1,7 +1,8 @@
 import time
 import logging
 from queue import PriorityQueue, Empty
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 from typing import List, Dict
 
 from backtest.build.simulation.sim_utils import SimulatedOrder
@@ -14,37 +15,31 @@ from .conflict_resolvers import ConflictResolver
 from .results_aggregator import BestResults, ResultsAggregator
 from .block_assembler import BlockAssembler
 from .task import ConflictTask
+from .logging_utils import start_parent_listener, init_worker_logging
 
 logger = logging.getLogger(__name__)
 
+_SIMULATOR = None
+_LOG_Q = None
 
-def _task_execution_wrapper(
-    context,
-    rpc_url: str,
-    task: ConflictTask,
-) -> SimulatedOrder:
+def _worker_init(ctx, rpc_url, log_q):
     """
-    Per-task worker executed in a thread.
-
-    Creates a fresh EVMSimulator (which forks at the required parent block).
-    Caching + prev-hash handling are now managed by patched titanoboa (boa_ext),
-    so we do NOT create per-thread cache dirs or manually copy prev hashes.
+    Runs once in each child process. Build and keep a single EVMSimulator.
     """
-    # Each thread creates its own simulator. The underlying disk cache file
-    # can be shared safely (independent sqlite connections per thread).
-    simulator = EVMSimulator(
-        simulation_context=context,
-        rpc_url=rpc_url
-    )
+    global _SIMULATOR, _LOG_Q
+    _LOG_Q = log_q
+    init_worker_logging(log_q)  # your queue-based logging setup
+    _SIMULATOR = EVMSimulator(simulation_context=ctx, rpc_url=rpc_url)
 
-    resolver = ConflictResolver(simulator)
+def _worker_run(task: ConflictTask):
+    """Executed for each task inside the process; reuses the global simulator."""
+    resolver = ConflictResolver(_SIMULATOR)
     return resolver.resolve_conflict_task(task)
-
 
 class ParallelBuilderConfig:
     """Configuration for the parallel builder."""
-    def __init__(self, num_threads: int = 4):
-        self.num_threads = num_threads
+    def __init__(self, num_workers: int = 4):
+        self.num_workers = num_workers
 
 
 class ParallelBuilder:
@@ -134,7 +129,6 @@ class ParallelBuilder:
         evm_simulator: EVMSimulator,
         results_aggregator: ResultsAggregator
     ):
-        """Drain the task queue and process tasks concurrently."""
         tasks: List[ConflictTask] = []
         while not task_queue.empty():
             try:
@@ -143,39 +137,34 @@ class ParallelBuilder:
                 break
 
         total = len(tasks)
-        logger.debug(
-            "Processing %d tasks with %d threads",
-            total,
-            self.config.num_threads
-        )
+        logger.debug("Processing %d tasks with %d processes", total, self.config.num_workers)
 
-        # Immutable data reused by workers
-        context = evm_simulator.context
+        # Prepare serializable context for child processes
+        ctx = evm_simulator.context
         rpc_url = evm_simulator.rpc_url
+        log_q, listener = start_parent_listener()
 
-        with ThreadPoolExecutor(max_workers=self.config.num_threads) as executor:
-            future_to_task = {
-                executor.submit(_task_execution_wrapper, context, rpc_url, task): task
-                for task in tasks
-            }
+        try:
+            with ProcessPoolExecutor(
+                max_workers=self.config.num_workers,
+                initializer=_worker_init,
+                initargs=(ctx, rpc_url, log_q),
+            ) as executor:
+                future_to_task = {executor.submit(_worker_run, task): task for task in tasks}
 
-            for idx, future in enumerate(as_completed(future_to_task), 1):
-                task = future_to_task[future]
-                try:
-                    result = future.result()
-                    results_aggregator.update_result(
-                        task.group_idx, result, task.group
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Task failed for group %s: %s",
-                        task.group_idx,
-                        e,
-                        exc_info=True
-                    )
-
-                if idx % 10 == 0 or idx == total:
-                    logger.debug("Completed %d/%d tasks", idx, total)
+                for idx, future in enumerate(as_completed(future_to_task), 1):
+                    task = future_to_task[future]
+                    try:
+                        result = future.result()
+                        results_aggregator.update_result(task.group_idx, result, task.group)
+                    except Exception as e:
+                        logger.warning(
+                            "Task failed for group %s: %s", task.group_idx, e, exc_info=True
+                        )
+                    if idx % 10 == 0 or idx == total:
+                        logger.debug("Completed %d/%d tasks", idx, total)
+        finally:
+            listener.stop()
 
     def _log_group_stats(self, conflict_groups):
         if not conflict_groups:
@@ -205,7 +194,7 @@ def run_parallel_builder(
     """
     builder_configs = {b['name']: b for b in config.get('builders', [])}
     parallel_cfg = builder_configs.get('parallel', {})
-    num_threads = parallel_cfg.get('num_threads', 4)
+    num_workers = parallel_cfg.get('num_workers', 1)
 
-    builder = ParallelBuilder(ParallelBuilderConfig(num_threads=num_threads))
+    builder = ParallelBuilder(ParallelBuilderConfig(num_workers=num_workers))
     return builder.build_block(simulated_orders, evm_simulator)
