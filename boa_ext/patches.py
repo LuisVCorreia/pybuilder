@@ -1,14 +1,20 @@
 from __future__ import annotations
 import pickle
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Type
 import threading
 import logging
 
 from boa.rpc import RPC, to_int, to_hex
 from boa.vm.fork import AccountDBFork, CachingRPC, _PREDEFINED_BLOCKS
-from boa.vm.py_evm import PyEVM
+from boa.vm.py_evm import PyEVM, VMPatcher, titanoboa_computation, Sha3PreimageTracer, SstoreTracer, GENESIS_PARAMS
 from boa.util.sqlitedb import SqliteCache
+from eth.db.account import AccountDB
+from boa.vm.fast_accountdb import patch_pyevm_state_object
+import eth.tools.builder.chain as chain
+from eth.chains.mainnet import MainnetChain
+from eth.db.atomic import AtomicDB
+
 
 CHAIN_ID = 1  # Hardcoded chain id (Ethereum mainnet)
 PREV_HASH_WINDOW = 256
@@ -31,6 +37,8 @@ def apply_patches():
         _patch_fetch_uncached()
         _patch_account_db_fork()
         _patch_pyevm_fork_rpc()
+        _patch_init_vm()
+        _patch_make_chain()
         _ALREADY_PATCHED = True
         logger.debug("boa_ext patches applied.")
 
@@ -133,12 +141,55 @@ def _patch_account_db_fork():
 
     AccountDBFork.__init__ = patched_init
 
+def _patch_init_vm():
+
+    def patched_init_vm(self, account_db_class=AccountDB, block_number: Optional[int] = None):
+        head = self.chain.get_canonical_head()
+        if block_number is None:
+            target_header = head
+        else:
+            # cheap header: copy() only mutates fields we pass
+            target_header = head.copy(block_number=block_number)
+
+        self.vm = self.chain.get_vm(target_header)
+        self.vm.__class__._state_class.account_db_class = account_db_class
+
+        # patcher & computation class wiring (unchanged)
+        self.patch = VMPatcher(self.vm)
+
+        c: Type[titanoboa_computation] = type(
+            "TitanoboaComputation",
+            (titanoboa_computation, self.vm.state.computation_class),
+            {"env": self.env},
+        )
+
+        if self._fast_mode_enabled:
+            patch_pyevm_state_object(self.vm.state)
+
+        self.vm.state.computation_class = c
+        c.opcodes[0x20] = Sha3PreimageTracer(c.opcodes[0x20], self.env)
+        c.opcodes[0x55] = SstoreTracer(c.opcodes[0x55], self.env)
+
+    PyEVM._init_vm = patched_init_vm
+
 def _patch_pyevm_fork_rpc():
-    orig_fork_rpc = PyEVM.fork_rpc
 
     def patched_fork_rpc(self: PyEVM, rpc: RPC, block_identifier: str, debug: bool, **kwargs):
         # Perform original fork (builds AccountDBFork etc.)
-        orig_fork_rpc(self, rpc, block_identifier, debug, **kwargs)
+        account_db_class = AccountDBFork.class_from_rpc(
+            rpc, block_identifier, debug, **kwargs
+        )
+
+        current_block = int(block_identifier, 16)
+        self._init_vm(account_db_class=account_db_class, block_number=current_block)
+
+        block_info = self.vm.state._account_db._block_info
+        chain_id = self.vm.state._account_db._chain_id
+
+        # 4) patch execution-context values
+        self.patch.timestamp    = int(block_info["timestamp"], 16)
+        self.patch.block_number = int(block_info["number"], 16)
+        self.patch.chain_id     = chain_id
 
         if not ENABLE_PREV_HASHES:
             return
@@ -164,6 +215,21 @@ def _patch_pyevm_fork_rpc():
         self.patch.prev_hashes = prev_hashes
 
     PyEVM.fork_rpc = patched_fork_rpc
+
+def _patch_make_chain():
+    import boa.vm.py_evm as py_mod  # patch module, not class
+
+    def patched_make_chain():
+        # start with all mainnet forks
+        print("Patching make_chain to use MainnetChain with GENESIS_PARAMS")
+        _Full = chain.build(MainnetChain)
+
+        full_cfg = _Full.vm_configuration
+        ChainCls = _Full.configure(vm_configuration=full_cfg)
+        print("Full cfg:", full_cfg)
+        return ChainCls.from_genesis(AtomicDB(), GENESIS_PARAMS)
+
+    py_mod._make_chain = patched_make_chain
 
 
 def _cache_key(block_number: int) -> bytes:

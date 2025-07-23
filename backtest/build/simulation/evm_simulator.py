@@ -9,6 +9,7 @@ from boa.vm.py_evm import Address
 from boa.rpc import EthereumRPC, to_hex
 from boa.environment import Env
 from eth.abc import SignedTransactionAPI
+from eth.vm.forks.berlin.transactions import AccessListTransaction
 from eth.vm.forks.london.transactions import DynamicFeeTransaction
 from eth.vm.forks.cancun.transactions import BlobTransaction, CancunTypedTransaction, CancunLegacyTransaction
 from eth.vm.forks.cancun.headers import CancunBlockHeader
@@ -95,6 +96,11 @@ class EVMSimulator:
             final_coinbase_balance = self.env.get_balance(coinbase_addr)
             coinbase_profit = self._calculate_coinbase_profit(initial_coinbase_balance, final_coinbase_balance)
 
+            if computation.is_error:
+                error_message = f"Transaction 0x{tx.hash.hex()} failed: {computation.error}"
+                logger.warning(error_message)
+
+
             return OrderSimResult(
                 success=True,
                 gas_used=receipt.gas_used,
@@ -134,8 +140,17 @@ class EVMSimulator:
         v = self._safe_to_int(tx_data.get("v"))
         r = self._safe_to_int(tx_data.get("r"))
         s = self._safe_to_int(tx_data.get("s"))
+
+        if tx_type_int == 1:
+            y_parity = v & 1
+            inner_tx = AccessListTransaction(
+                chain_id=1, nonce=nonce, gas_price=gas_price, gas=gas, to=to_addr.canonical_address,
+                value=value, data=data, access_list=access_list, y_parity=y_parity, r=r, s=s,
+            )
+            # Wrap in CancunTypedTransaction because you’re on the Cancun VM
+            return CancunTypedTransaction(1, inner_tx)
         
-        if tx_type_int == 2:
+        elif tx_type_int == 2:
             y_parity = self._safe_to_int(tx_data["y_parity"])
             max_fee_per_gas = self._safe_to_int(tx_data["max_fee_per_gas"])
             max_priority_fee_per_gas = self._safe_to_int(tx_data["max_priority_fee_per_gas"])
@@ -153,14 +168,14 @@ class EVMSimulator:
             blob_hashes = tx_data.get("blob_versioned_hashes")
             inner_tx = BlobTransaction(
                 chain_id=1, nonce=nonce, max_priority_fee_per_gas=max_priority_fee_per_gas,
-                max_fee_per_gas=max_fee_per_gas, gas=gas, to=to_addr.canonical_address if to_addr else b'',
+                max_fee_per_gas=max_fee_per_gas, gas=gas, to=to_addr.canonical_address,
                 value=value, data=data, max_fee_per_blob_gas=max_fee_per_blob_gas,
                 blob_versioned_hashes=blob_hashes, access_list=access_list, y_parity=y_parity, r=r, s=s,
             )
             return CancunTypedTransaction(3, inner_tx)
         else:
             return CancunLegacyTransaction(
-                nonce=nonce, gas_price=gas_price, gas=gas, to=to_addr.canonical_address if to_addr else b'',
+                nonce=nonce, gas_price=gas_price, gas=gas, to=to_addr.canonical_address,
                 value=value, data=data, v=v, r=r, s=s,
             )
 
@@ -174,6 +189,7 @@ class EVMSimulator:
             difficulty=self.context.block_difficulty, withdrawals_root=self.context.withdrawals_root,
             gas_used=0, excess_blob_gas=self.context.excess_blob_gas, receipt_root=self.context.receipt_root,
             mix_hash=self.context.mix_hash, parent_beacon_block_root=self.context.parent_beacon_block_root,
+            bloom=self.context.bloom, extra_data=self.context.extra_data
         )
 
     def _override_execution_context(self):
@@ -357,3 +373,29 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
     except Exception as e:
         logger.error(f"Block simulation failed: {e}", exc_info=True)
         raise
+
+# def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[SimulatedOrder]:
+
+
+#     # Execute first tx with hash tx:0x95c572ec5a475c615cf24758c367e834df214119139e6e573c713156d99325ad
+#     # then tx with hash tx:0x0de7a57fb278beca6c802e2e007c29df311127080e2e37a189a4a8702cf567c6
+
+#     # get the first order
+#     first_order = next((o for o in orders if o.id().value == "0xb05a3f2b8891db2ac45508cc1fb3d8504478b2f37059b970d0ba3d9af63bc223"), None)
+#     second_order = next((o for o in orders if o.id().value == "0x3c41a592347a917d6e2d72bf0cf47e2902d5ec4053c4d8cbe0505de8799a579c"), None)
+#     # third_order = next((o for o in orders if o.id().value == "0x1912bb377d6a2e13c76b3a48ef6c5b793eda305943cdde0f685abe3a851d6b88"), None)
+#     # if not first_order or not second_order or not third_order:
+#     #     raise ValueError("Required orders not found in the provided list")
+    
+
+#     # Simulate first order
+#     first_simulated_order = simulator._simulate_tx_order(first_order)
+#     logger.info(f"First order simulation result: {first_simulated_order.simulation_result.success}, gas used: {first_simulated_order.simulation_result.gas_used}, coinbase profit: {first_simulated_order.simulation_result.coinbase_profit}")
+
+#     # # Simulate second order
+#     # second_simulated_order = simulator._simulate_tx_order(second_order)
+#     # logger.info(f"Second order simulation result: {second_simulated_order.simulation_result.success}, gas used: {second_simulated_order.simulation_result.gas_used}, coinbase profit: {second_simulated_order.simulation_result.coinbase_profit}")
+
+#     # # Simulate third order
+#     # third_simulated_order = simulator.simulate_tx_order(third_order)
+#     # logger.info(f"Third order simulation result: {third_simulated_order.simulation_result.success}, gas used: {third_simulated_order.simulation_result.gas_used}, coinbase profit: {third_simulated_order.simulation_result.coinbase_profit}")

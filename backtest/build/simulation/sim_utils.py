@@ -30,6 +30,8 @@ class SimulationContext:
     nonce: Optional[str] = None
     mix_hash: Optional[str] = None
     parent_beacon_block_root: Optional[str] = None
+    bloom: Optional[str] = None
+    extra_data: Optional[str] = None
 
     @classmethod
     def from_onchain_block(cls, onchain_block: dict, winning_bid_trace: dict = None) -> 'SimulationContext':
@@ -60,6 +62,8 @@ class SimulationContext:
             nonce=onchain_block.get('nonce', '0x0000000000000000'),
             mix_hash=onchain_block.get('mixHash'),
             parent_beacon_block_root=onchain_block.get('parentBeaconBlockRoot'),
+            bloom=onchain_block.get('logsBloom', '0x' + '00' * 256),
+            extra_data=onchain_block.get('extraData', '0x'),
         )
 
         # If we have winning bid trace, use the fee recipient from there
