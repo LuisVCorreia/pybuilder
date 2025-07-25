@@ -28,7 +28,7 @@ def _worker_init(ctx, rpc_url, log_q):
     """
     global _SIMULATOR, _LOG_Q
     _LOG_Q = log_q
-    init_worker_logging(log_q)  # your queue-based logging setup
+    init_worker_logging(log_q)
     _SIMULATOR = EVMSimulator(simulation_context=ctx, rpc_url=rpc_url)
 
 def _worker_run(task: ConflictTask):

@@ -67,9 +67,6 @@ class ConflictResolver:
 
         logger.debug("Simulating sequence: %s", sequence)
 
-        # Locate longest cached prefix
-        cached_len, cached_entry = self._find_cached_prefix(orders, sequence)
-
         # Reset VM to a clean state
         self.evm_simulator.fork_at_block(self.evm_simulator.context.block_number - 1)
         acct_db: AccountDB = self.evm_simulator.env.evm.vm.state._account_db
@@ -77,6 +74,9 @@ class ConflictResolver:
         # Collect referenced (non-optional) addresses and build initial nonce_state
         referenced = self._collect_referenced_addresses(orders, sequence)
         nonce_state = self._init_nonce_state(referenced)
+
+        # Locate longest cached prefix
+        cached_len, cached_entry = self._find_cached_prefix(orders, sequence)
 
         # Apply cached state if present
         if cached_entry:
@@ -106,8 +106,6 @@ class ConflictResolver:
         while remaining:
             idx = remaining.pop()
             order = orders[idx]
-
-            logger.debug("Simulating order %d: %s", idx, order.order.id().value)
 
             if not self._are_nonces_valid(order, nonce_state):
                 logger.debug("Order %s nonces not valid, deferring", order.order.id().value)
@@ -154,7 +152,8 @@ class ConflictResolver:
             )
 
         if pending:
-            logger.warning("Leftover pending after sim: %s", pending)
+            # Pending orders can remain if multiple orders have the same nonce
+            logger.debug("Leftover pending after sim: %s", pending)
 
         # Return the last cached entry (the full run)
         prefix_key = self._get_cache_key(orders, executed_ids)
@@ -246,6 +245,7 @@ class ConflictResolver:
                 continue
             expected = nonce_state.get(nonce_info.address, nonce_info.nonce)
             if nonce_info.nonce != expected:
+                logger.debug(f"Order {order.order.id()} has invalid nonce {nonce_info.nonce}, expected: {expected}")
                 return False
         return True
 
@@ -331,21 +331,6 @@ class ConflictResolver:
             sequences.append(sequence)
         
         return sequences
-
-    def _are_nonces_valid(self, order: SimulatedOrder, nonce_state: Dict[str, int]) -> bool:
-        """
-        Check if an order's nonces are valid given the current nonce state.
-        """
-        for nonce_info in order.order.nonces():
-            if not nonce_info.optional:
-                expected_nonce = nonce_state.get(nonce_info.address, nonce_info.nonce)
-                if nonce_info.nonce < expected_nonce:
-                    # Nonce too low - order already used
-                    return False
-                elif nonce_info.nonce > expected_nonce:
-                    # Nonce too high - there's a gap, order can't execute yet
-                    return False
-        return True
 
     def _get_order_length(self, order: SimulatedOrder) -> int:
         """Get the length (number of transactions) in an order."""

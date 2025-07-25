@@ -114,13 +114,13 @@ def _patch_account_db_fork():
         # MRO: AccountDBFork -> AccountDB -> ...
         super(AccountDBFork, self).__init__(*a, **k)
 
-        from eth.db.backends.memory import MemoryDB  # safe import here
+        from eth.db.backends.memory import MemoryDB
         from eth.db.journal import JournalDB
 
         self._dontfetch = JournalDB(MemoryDB())
         self._rpc = rpc
 
-        # Normalize block identifier
+        # Normalise block identifier
         if block_identifier not in _PREDEFINED_BLOCKS:
             if isinstance(block_identifier, int):
                 block_identifier_hex = hex(block_identifier)
@@ -220,13 +220,11 @@ def _patch_make_chain():
     import boa.vm.py_evm as py_mod  # patch module, not class
 
     def patched_make_chain():
-        # start with all mainnet forks
-        print("Patching make_chain to use MainnetChain with GENESIS_PARAMS")
+        # Start with all mainnet forks
         _Full = chain.build(MainnetChain)
 
         full_cfg = _Full.vm_configuration
         ChainCls = _Full.configure(vm_configuration=full_cfg)
-        print("Full cfg:", full_cfg)
         return ChainCls.from_genesis(AtomicDB(), GENESIS_PARAMS)
 
     py_mod._make_chain = patched_make_chain

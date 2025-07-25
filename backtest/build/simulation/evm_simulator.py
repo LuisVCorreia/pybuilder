@@ -28,24 +28,29 @@ class EVMSimulator:
         self.rpc = EthereumRPC(rpc_url)
         self.env = Env(fast_mode_enabled=True, fork_try_prefetch_state=True)
         self.rpc_url = rpc_url
+        self.vm = self.env.evm.vm
         self.state_tracer = PyEVMOpcodeStateTracer(self.env)  
         self.fork_at_block(self.context.block_number - 1)
 
     def fork_at_block(self, block_number: int):
+        # Forking the EVM will re-initiliase the correct VM based on the block timestamp
         block_id = to_hex(block_number)
         self.env.fork_rpc(self.rpc, block_identifier=block_id)
+        self.vm = self.env.evm.vm
         self._override_execution_context()  # Ensure execution context is set correctly
 
     def simulate_order_with_parents(self, order: Order, parent_orders: List[Order] = None) -> SimulatedOrder:
         parent_orders = parent_orders or []
         try:
-            self.fork_at_block(self.context.block_number - 1)
+            self.vm.state.lock_changes()
+            cp = self.vm.state.snapshot()
             accumulated_trace = UsedStateTrace()
                 
             # Simulate parent orders and accumulate their traces
             for parent_order in parent_orders:
                 parent_res = self._simulate_single_order(parent_order, accumulated_trace)
                 if not parent_res.simulation_result.success:
+                    self.vm.state.revert(cp)
                     error_message = f"Parent order failed: {parent_res.simulation_result.error_message}"
                     error_result = OrderSimResult(success=False, gas_used=0, coinbase_profit=0, blob_gas_used=0, paid_kickbacks=0, error=SimulationError.VALIDATION_ERROR, error_message=error_message)
                     return self._convert_result_to_simulated_order(order, error_result)
@@ -56,8 +61,10 @@ class EVMSimulator:
 
             # Simulate the final order
             final_res = self._simulate_single_order(order, accumulated_trace)
+            self.vm.state.revert(cp)
             return final_res
         except Exception as e:
+            self.vm.state.revert(cp)
             error_result = OrderSimResult(success=False, gas_used=0, coinbase_profit=0, blob_gas_used=0, paid_kickbacks=0, error=SimulationError.VALIDATION_ERROR, error_message=str(e))
             return self._convert_result_to_simulated_order(order, error_result)
 
@@ -75,7 +82,13 @@ class EVMSimulator:
             # Start state tracing (patches EVM opcodes)
             self.state_tracer.start_tracing(tx)
 
-            receipt, computation = self.env.evm.vm.apply_transaction(header, tx)
+            # Validate header & tx manually
+            self.vm.validate_transaction_against_header(header, tx)
+
+            # Execute the transaction in the EVM
+            computation = self.vm.state.apply_transaction(tx)  # low‑level exec
+            receipt     = self.vm.make_receipt(header, tx, computation, self.vm.state)
+            self.vm.validate_receipt(receipt)
 
             # Finish state tracing and get the trace (pass tx for simple transfer handling)
             tx_state_trace = self.state_tracer.finish_tracing(computation, tx)
@@ -114,7 +127,7 @@ class EVMSimulator:
             )
 
         except Exception as e:
-            logger.error(f"Transaction simulation failed during validation: {str(e)}")
+            logger.error(f"Transaction 0x{tx.hash.hex()} simulation failed during validation: {str(e)}")
             return OrderSimResult(
                 success=False,
                 gas_used=0,
