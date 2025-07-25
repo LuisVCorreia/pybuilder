@@ -88,11 +88,9 @@ class BlockBuildingHelper:
             Dictionary with execution results
         """
         try:
-            self.simulator.vm.state.lock_changes()
-            cp = self.simulator.vm.state.snapshot()
             # Always use in-block simulation - re-execute the order in current EVM state
             logger.debug(f"Re-executing order {order.order.id()} in block context")
-            in_block_result = self.simulator.simulate_and_commit_order(order.order)
+            in_block_result, checkpoint = self.simulator.simulate_and_commit_order(order.order)
             
             if not in_block_result.simulation_result.success:
                 raise ExecutionError(
@@ -152,11 +150,11 @@ class BlockBuildingHelper:
             return new_sim_value, nonces_updated
             
         except ExecutionError:
-            self.simulator.vm.state.revert(cp)
+            self.simulator.vm.state.revert(checkpoint)
             logger.debug(f"Order {order.order.id()} execution failed, rolling back state")
             raise
         except Exception as e:
-            self.simulator.vm.state.revert(cp)
+            self.simulator.vm.state.revert(checkpoint)
             logger.debug(f"Order {order.order.id()} execution failed: {e}")
             raise ExecutionError(f"Order execution failed: {e}", "execution_error")
     

@@ -44,6 +44,7 @@ class EVMSimulator:
         try:
             self.vm.state.lock_changes()
             cp = self.vm.state.snapshot()
+            # self.fork_at_block(self.context.block_number - 1)
             accumulated_trace = UsedStateTrace()
                 
             # Simulate parent orders and accumulate their traces
@@ -68,8 +69,13 @@ class EVMSimulator:
             error_result = OrderSimResult(success=False, gas_used=0, coinbase_profit=0, blob_gas_used=0, paid_kickbacks=0, error=SimulationError.VALIDATION_ERROR, error_message=str(e))
             return self._convert_result_to_simulated_order(order, error_result)
 
-    def simulate_and_commit_order(self, order: Order) -> SimulatedOrder:
-        return self._simulate_single_order(order)
+    def simulate_and_commit_order(self, order: Order) -> tuple[SimulatedOrder, HexBytes]:
+        """
+        Simulate and commit an order, returning the simulation result and a state checkpoint.
+        """
+        self.vm.state.lock_changes()
+        checkpoint = self.vm.state.snapshot()
+        return self._simulate_single_order(order), checkpoint
 
     def _execute_tx(self, tx_data, accumulated_trace=None) -> OrderSimResult:
         try:
@@ -89,6 +95,8 @@ class EVMSimulator:
             computation = self.vm.state.apply_transaction(tx)  # low‑level exec
             receipt     = self.vm.make_receipt(header, tx, computation, self.vm.state)
             self.vm.validate_receipt(receipt)
+
+            # receipt, computation = self.env.evm.vm.apply_transaction(header, tx)
 
             # Finish state tracing and get the trace (pass tx for simple transfer handling)
             tx_state_trace = self.state_tracer.finish_tracing(computation, tx)

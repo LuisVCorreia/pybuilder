@@ -113,7 +113,7 @@ class ConflictResolver:
                 continue
 
             try:
-                sim_ord = self.evm_simulator.simulate_and_commit_order(order.order)
+                sim_ord, _ = self.evm_simulator.simulate_and_commit_order(order.order)
             except Exception as exc:
                 logger.warning("Simulator exception on order %d: %s", idx, exc)
                 seq_profits.append((idx, 0))
@@ -123,24 +123,20 @@ class ConflictResolver:
                 seq_profits.append((idx, profit))
                 executed_ids.append(idx)
 
-                if not sim_ord._error_result:
-                    if profit > 0:
-                        total_profit += profit
+                total_profit += profit
 
-                    # Reload nonces after state changes
-                    self._sync_nonces_from_vm(referenced, nonce_state)
+                # Reload nonces after state changes
+                self._sync_nonces_from_vm(referenced, nonce_state)
 
-                    # Try to unlock pending orders
-                    if pending:
-                        still = []
-                        for p in pending:
-                            if self._are_nonces_valid(orders[p], nonce_state):
-                                remaining.append(p)
-                            else:
-                                still.append(p)
-                        pending = still
-                else:
-                    logger.warning("Unexpected validation failure for order %d", idx)
+                # Try to unlock pending orders
+                if pending:
+                    still = []
+                    for p in pending:
+                        if self._are_nonces_valid(orders[p], nonce_state):
+                            remaining.append(p)
+                        else:
+                            still.append(p)
+                    pending = still
 
             # 7) Snapshot/cache current prefix
             self._cache_current_prefix(
