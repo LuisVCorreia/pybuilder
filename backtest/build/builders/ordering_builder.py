@@ -10,7 +10,8 @@ from backtest.common.order import OrderId, TxNonce
 from .order_priority import (
     Sorting, 
     PrioritizedOrderStore, 
-    create_priority_class, 
+    create_priority_class,
+    MIN_SIM_RESULT_PERCENTAGE
 )
 from .block_result import BlockResult
 from .block_building_helper import BlockBuildingHelper, ExecutionError
@@ -223,22 +224,34 @@ class OrderingBuilder:
                 continue
             
             logger.debug(f"Attempting to include order {order_id} (attempt {order_attempts[order_id] + 1})")
-            
-            def profit_validator(original_sim: SimValue, new_sim: SimValue) -> None:
-                # Similar to rbuilder's simulation_too_low check
+
+            def profit_validator(order_id: OrderId, original_sim: SimValue, new_sim: SimValue) -> None:
+                mode = self.config.sorting.value
                 if self.priority_class.simulation_too_low(original_sim, new_sim):
+                    if mode == Sorting.MAX_PROFIT.value:
+                        before, after = original_sim.coinbase_profit, new_sim.coinbase_profit
+                        metric = "profit"
+                    else:
+                        before, after = original_sim.mev_gas_price, new_sim.mev_gas_price
+                        metric = "MEV gas price"
+
+                    threshold = (before * MIN_SIM_RESULT_PERCENTAGE) // 100
+
                     raise ExecutionError(
-                        f"Profit too low: {new_sim.coinbase_profit} < expected",
-                        "profit_too_low"
+                        f"[{mode}] Order {order_id} {metric} dropped "
+                        f"{after} < {threshold} ({MIN_SIM_RESULT_PERCENTAGE}%)",
+                        error_type="sim_too_low",
+                        new_sim=new_sim
                     )
+
             
             # Attempt to commit the order
             try:
-                result = helper.commit_order(sim_order, profit_validator)
+                new_sim_value, nonces_updates = helper.commit_order(sim_order, profit_validator)
                 
                 # Order succeeded - update nonces in order store
                 nonces_updated = []
-                for account, nonce in result['nonces_updated']:
+                for account, nonce in nonces_updates:
                     nonces_updated.append(TxNonce(address=account, nonce=nonce, optional=False))
                 
                 if nonces_updated:
@@ -248,8 +261,8 @@ class OrderingBuilder:
                     order_store.update_onchain_nonces(nonces_updated)
                 
                 logger.debug(
-                    f"Included order {order_id}: {result['gas_used']:,} gas, "
-                    f"{result['coinbase_profit']} wei profit"
+                    f"Included order {order_id}: {new_sim_value.gas_used:,} gas, "
+                    f"{new_sim_value.coinbase_profit} wei profit"
                 )
                 
             except ExecutionError as e:
@@ -283,11 +296,16 @@ class OrderingBuilder:
         
         # Check if we can retry with lower expected profit
         if (attempt_count < self.config.failed_order_retries and 
-            error.error_type == "profit_too_low"):
-            
+            error.error_type == "sim_too_low"):
+
+            if error.new_sim is not None:
+                # Update simulation value with new lower expected profit
+                sim_order.sim_value = error.new_sim
+
             # Re-insert order with updated simulation value for retry
             # In a real implementation, this would use the actual execution result
-            logger.debug(f"Retrying order {order_id} (attempt {attempt_count + 1}/{self.config.failed_order_retries})")
+            logger.info(f"Retrying order {order_id} (attempt {attempt_count + 1}/{self.config.failed_order_retries})")
+            logger.info(error)
             order_attempts[order_id] += 1
             order_store.insert_order(sim_order)
             
@@ -296,7 +314,7 @@ class OrderingBuilder:
             if self.config.drop_failed_orders:
                 failed_orders.add(order_id)
             
-            logger.debug(
+            logger.info(
                 f"Order {order_id} failed permanently: {error} "
                 f"(attempts: {attempt_count + 1})"
             )

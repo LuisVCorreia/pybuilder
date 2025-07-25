@@ -1,11 +1,12 @@
 from decimal import Decimal
 import logging
 import time
-from typing import List, Dict, Optional, Any, Callable
+from typing import List, Dict, Optional, Callable
 
 from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue
 from backtest.build.simulation.evm_simulator import EVMSimulator
 from .block_result import BlockResult, BlockTrace
+from backtest.common.order import OrderId
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +16,15 @@ PAYOUT_GAS_LIMIT = 21000
 
 class ExecutionError(Exception):
     """Exception raised when order execution fails."""
-    def __init__(self, message: str, error_type: str = "execution_error"):
+    def __init__(
+        self,
+        message: str,
+        error_type: str = "execution_error",
+        new_sim: Optional[SimValue] = None,
+    ):
         super().__init__(message)
         self.error_type = error_type
-
+        self.new_sim    = new_sim
 
 class BlockBuildingHelper:
     """
@@ -70,7 +76,7 @@ class BlockBuildingHelper:
             return None
 
     def commit_order(self, order: SimulatedOrder, 
-                    filter_result: Optional[Callable[[SimValue, SimValue], None]] = None) -> Dict[str, Any]:
+                    filter_result: Optional[Callable] = None) -> tuple[SimValue, List[tuple]]:
         """
         Attempt to commit an order to the block using in-block EVM simulation.
         
@@ -108,9 +114,11 @@ class BlockBuildingHelper:
                 mev_gas_price=simulated_profit / simulated_gas if simulated_gas > 0 else Decimal(0),
                 paid_kickbacks=simulated_kickbacks
             )
-            
+
             if filter_result:
-                filter_result(order.sim_value, new_sim_value)
+                filter_result(order.order.id(), order.sim_value, new_sim_value)
+
+            order.sim_value = new_sim_value
             
             # Check gas limits
             if self.gas_used + simulated_gas > self.context.block_gas_limit:
@@ -139,15 +147,7 @@ class BlockBuildingHelper:
                 f"{simulated_gas:,} gas, {simulated_profit} wei profit"
             )
             
-            return {
-                'success': True,
-                'gas_used': simulated_gas,
-                'coinbase_profit': simulated_profit,
-                'blob_gas_used': simulated_blob_gas,
-                'paid_kickbacks': simulated_kickbacks,
-                'nonces_updated': nonces_updated,
-                'sim_value': new_sim_value
-            }
+            return new_sim_value, nonces_updated
             
         except ExecutionError:
             raise
