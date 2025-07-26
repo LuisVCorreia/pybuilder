@@ -1,5 +1,6 @@
 from decimal import Decimal
 import logging
+import copy
 import time
 from typing import List, Dict, Optional, Callable
 
@@ -188,11 +189,13 @@ class BlockBuildingHelper:
             orders_closed_at=self.orders_closed_at,
             fill_time_ms=fill_time_ms
         )
-        
+
+        orders_deep_copy = [copy.deepcopy(order) for order in self.included_orders]
+
         return BlockResult(
             builder_name=self.builder_name,
             success=True,
             block_trace=trace,
-            included_orders=self.included_orders.copy(),
+            included_orders=orders_deep_copy,
             build_time_ms=fill_time_ms
         )
