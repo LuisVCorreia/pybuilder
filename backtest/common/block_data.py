@@ -121,7 +121,6 @@ class BlockData:
     def filter_bundles_from_mempool(self):
         """
         Remove all bundles that have all transactions available in the public mempool.
-        Matches Rust implementation.
         """
         # Get all mempool transaction hashes
         mempool_txs = set()
@@ -175,54 +174,6 @@ class BlockData:
                 filtered_orders.append(order_with_ts)
         
         self.available_orders = filtered_orders
-
-    def search_missing_txs_on_available_orders(self) -> List[str]:
-        """
-        Returns tx hashes on onchain_block not found in any available_orders,
-        except for the validator payment tx.
-        Matches Rust implementation.
-        """
-        result = []
-        
-        # Get all available transaction hashes
-        available_txs = set()
-        for order_with_ts in self.available_orders:
-            for tx in order_with_ts.order.transactions():
-                tx_hash = tx.get('hash', '')
-                if tx_hash:
-                    available_txs.add(tx_hash)
-        
-        # Get onchain transactions
-        if 'transactions' in self.onchain_block:
-            for tx in self.onchain_block['transactions']:
-                tx_hash = tx.get('hash', '')
-                if tx_hash and not self.is_validator_fee_payment(tx):
-                    if tx_hash not in available_txs:
-                        result.append(tx_hash)
-        
-        return result
-
-    def search_missing_account_nonce_on_available_orders(self) -> List[tuple]:
-        """
-        Returns landed txs targeting account nonces none of our available txs were targeting.
-        Matches Rust implementation.
-        """
-        # Get all available account nonces
-        available_accounts = set()
-        for order_with_ts in self.available_orders:
-            for nonce in order_with_ts.order.nonces():
-                available_accounts.add((nonce.address.lower(), nonce.nonce))
-        
-        result = []
-        if 'transactions' in self.onchain_block:
-            for tx in self.onchain_block['transactions']:
-                if not self.is_validator_fee_payment(tx):
-                    tx_from = tx.get('from', '').lower()
-                    tx_nonce = tx.get('nonce', 0)
-                    if (tx_from, tx_nonce) not in available_accounts:
-                        result.append((tx.get('hash', ''), (tx_from, tx_nonce)))
-        
-        return result
 
     def is_validator_fee_payment(self, tx: Dict[str, Any]) -> bool:
         """Check if transaction is a validator fee payment"""

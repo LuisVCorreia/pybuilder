@@ -532,7 +532,7 @@ def filter_orders_by_nonces(
             with lock:
                 nonce_cache[address] = nonce
         except Exception as e:
-            logger.debug(f"Could not fetch nonce for {address}@{parent_block}: {e}")
+            logger.warning(f"Could not fetch nonce for {address}@{parent_block}: {e}")
             # If fetching fails, we can't validate, so we store -1 to indicate failure
             with lock:
                 nonce_cache[address] = -1

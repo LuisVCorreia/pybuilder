@@ -91,7 +91,7 @@ class BlockBuildingHelper:
         try:
             # Always use in-block simulation - re-execute the order in current EVM state
             logger.debug(f"Re-executing order {order.order.id()} in block context")
-            in_block_result, checkpoint = self.simulator.simulate_and_commit_order(order.order)
+            in_block_result, checkpoint = self.simulator.simulate_order(order.order)
             
             if not in_block_result.simulation_result.success:
                 raise ExecutionError(

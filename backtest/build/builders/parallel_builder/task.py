@@ -76,7 +76,6 @@ NUMBER_OF_RANDOM_TASKS = 10  # Note: rbuilder uses 50
 
 
 def get_tasks_for_group(group: ConflictGroup, priority: TaskPriority) -> List[ConflictTask]:
-    """Generate tasks for a conflict group - matches rbuilder's get_tasks_for_group."""
     tasks = []
     created_at = time.time()
     

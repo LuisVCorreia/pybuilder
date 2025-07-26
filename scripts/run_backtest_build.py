@@ -24,7 +24,6 @@ def main():
     # Arguments from ExtraCfg
     parser.add_argument("block", type=int, help="Block number to build")
     parser.add_argument("--sim-landed-block", action="store_true", help="Show landed block txs values")
-    parser.add_argument("--show-missing", action="store_true", help="Show missing block txs")
     parser.add_argument("--only-order-ids", nargs='*', help="Use only these order IDs")
     parser.add_argument("--block-building-time-ms", type=int, default=0, help="Block building lag in milliseconds")
 

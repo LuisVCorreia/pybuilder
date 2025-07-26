@@ -2,7 +2,7 @@ from decimal import Decimal
 import logging
 from typing import List, Optional
 from hexbytes import HexBytes
-import web3
+import ast
 import boa_ext
 
 from boa.vm.py_evm import Address
@@ -42,16 +42,14 @@ class EVMSimulator:
     def simulate_order_with_parents(self, order: Order, parent_orders: List[Order] = None) -> SimulatedOrder:
         parent_orders = parent_orders or []
         try:
-            self.vm.state.lock_changes()
-            cp = self.vm.state.snapshot()
-            # self.fork_at_block(self.context.block_number - 1)
+            self.fork_at_block(self.context.block_number - 1)
             accumulated_trace = UsedStateTrace()
                 
             # Simulate parent orders and accumulate their traces
             for parent_order in parent_orders:
+                self.vm.state.lock_changes()
                 parent_res = self._simulate_single_order(parent_order, accumulated_trace)
                 if not parent_res.simulation_result.success:
-                    self.vm.state.revert(cp)
                     error_message = f"Parent order failed: {parent_res.simulation_result.error_message}"
                     error_result = OrderSimResult(success=False, gas_used=0, coinbase_profit=0, blob_gas_used=0, paid_kickbacks=0, error=SimulationError.VALIDATION_ERROR, error_message=error_message)
                     return self._convert_result_to_simulated_order(order, error_result)
@@ -61,17 +59,16 @@ class EVMSimulator:
                     accumulated_trace = parent_res.simulation_result.state_trace
 
             # Simulate the final order
+            self.vm.state.lock_changes()
             final_res = self._simulate_single_order(order, accumulated_trace)
-            self.vm.state.revert(cp)
             return final_res
         except Exception as e:
-            self.vm.state.revert(cp)
             error_result = OrderSimResult(success=False, gas_used=0, coinbase_profit=0, blob_gas_used=0, paid_kickbacks=0, error=SimulationError.VALIDATION_ERROR, error_message=str(e))
             return self._convert_result_to_simulated_order(order, error_result)
 
-    def simulate_and_commit_order(self, order: Order) -> tuple[SimulatedOrder, HexBytes]:
+    def simulate_order(self, order: Order) -> tuple[SimulatedOrder, HexBytes]:
         """
-        Simulate and commit an order, returning the simulation result and a state checkpoint.
+        Simulate an order, returning the simulation result and a state checkpoint.
         """
         self.vm.state.lock_changes()
         checkpoint = self.vm.state.snapshot()
@@ -245,22 +242,39 @@ class EVMSimulator:
         return max(0, final_balance - initial_balance)
 
     def _safe_to_int(self, value: int | str | bytes) -> int:
-        if not value: return 0
-        if isinstance(value, int): return value
-        if isinstance(value, bytes): return int.from_bytes(value, byteorder='big')
-        if value == "0x": return 0
-        return int(value, 16)
+        if not value:
+            return 0
+        if isinstance(value, int):
+            return value
+        if isinstance(value, bytes):
+            return int.from_bytes(value, byteorder='big')
+        if isinstance(value, str):
+            value = value.strip().lower()
+            if value == "0x" or value == "":
+                return 0
+            return int(value, 16)
+        raise TypeError(f"Unsupported type for int conversion: {type(value)}")
+
 
     def _safe_to_bytes(self, value) -> bytes:
-        if value is None: return b''
-        elif isinstance(value, bytes): return value
-        elif isinstance(value, str):
-            if value.startswith("b'") and value.endswith("'"):
-                try: return eval(value)
-                except: pass
-            return bytes.fromhex(value.removeprefix("0x"))
-        else:
-            return bytes(value)
+        if value is None:
+            return b''
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            value = value.strip()
+            if value.startswith("0x"):
+                return bytes.fromhex(value[2:])
+            if value.startswith("b'") or value.startswith('b"'):
+                try:
+                    return ast.literal_eval(value)
+                except Exception:
+                    pass
+            try:
+                return value.encode('latin1')  # Fallback: encode raw string
+            except Exception:
+                pass
+        return bytes(value)
 
     def _simulate_single_order(self, order: Order, accumulated_trace=None) -> SimulatedOrder:
         """

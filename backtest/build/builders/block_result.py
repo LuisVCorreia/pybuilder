@@ -161,24 +161,12 @@ class BuilderComparison:
         if best.included_orders:
             print("\nUsed orders:")
             # Show orders in the order they were actually included (not sorted by profit)
-            # This matches rbuilder's output which shows the actual inclusion sequence
             
             for order_result in best.included_orders:
                 order_id = order_result.order.id()
                 gas_used = order_result.sim_value.gas_used
                 profit_eth = order_result.sim_value.coinbase_profit / 10**18
-                
-                # Format to match rbuilder's exact output format:
-                # - Gas: right-aligned, no commas, 8 characters wide
-                # - Profit: 18 decimal places to match rbuilder precision
+
                 print(f"        {str(order_id)} gas: {gas_used:>8} profit: {profit_eth:.18f}")
-                
-                # For bundles, show transaction details (if available)
-                # Note: In our mock implementation, we don't have bundle details,
-                # but this is where they would be displayed with minimal indentation
-                nonces = order_result.order.nonces()
-                if len(nonces) > 1:  # Multiple nonces might indicate a bundle-like structure
-                    for nonce_info in nonces:
-                        print(f"  ↳ account: {nonce_info.address} nonce: {nonce_info.nonce}")
-        
+
         print("="*80)
