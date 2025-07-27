@@ -128,9 +128,10 @@ class BlockBuildingHelper:
                     "gas_limit_exceeded"
                 )
 
-            if self.blob_gas_used + simulated_blob_gas > MAX_BLOB_GAS_PER_BLOCK:
+            if self.blob_gas_used + simulated_blob_gas > self.simulator.get_max_blob_gas_per_block():
                 raise ExecutionError(
-                    f"Blob gas limit exceeded: {self.blob_gas_used + simulated_blob_gas} > {MAX_BLOB_GAS_PER_BLOCK}",
+                    (f"Blob gas limit exceeded: {self.blob_gas_used + simulated_blob_gas} > "
+                     f"{self.simulator.get_max_blob_gas_per_block()}"),
                     "blob_gas_limit_exceeded"
                 )
                     

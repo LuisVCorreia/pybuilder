@@ -3,6 +3,7 @@ import logging
 from typing import List, Optional
 from hexbytes import HexBytes
 import ast
+import inspect
 import boa_ext
 
 from boa.vm.py_evm import Address
@@ -13,8 +14,10 @@ from eth.vm.forks.berlin.transactions import AccessListTransaction
 from eth.vm.forks.london.transactions import DynamicFeeTransaction
 from eth.vm.forks.prague.transactions import SetCodeTransaction, Authorization, PragueTypedTransaction, PragueLegacyTransaction
 from eth.vm.forks.cancun.transactions import BlobTransaction, CancunTypedTransaction
-from eth.vm.forks.cancun.headers import CancunBlockHeader
+from eth.vm.forks.berlin.transactions import TypedTransaction
 from eth.vm.forks.prague.headers import PragueBlockHeader
+from eth.vm.forks.prague.constants import MAX_BLOB_GAS_PER_BLOCK as PRAGUE_MAX_BLOB_GAS
+from eth.vm.forks.cancun.constants import MAX_BLOB_GAS_PER_BLOCK as CANCUN_MAX_BLOB_GAS
 
 from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareBundleOrder
 from .sim_tree import SimTree, SimulatedResult, NonceKey
@@ -28,7 +31,7 @@ class EVMSimulator:
     def __init__(self, simulation_context: SimulationContext, rpc_url: str):
         self.context = simulation_context
         self.rpc = EthereumRPC(rpc_url)
-        self.env = Env(fast_mode_enabled=False, fork_try_prefetch_state=False)
+        self.env = Env(fast_mode_enabled=True, fork_try_prefetch_state=True)
         self.rpc_url = rpc_url
         self.vm = self.env.evm.vm
         self.state_tracer = PyEVMOpcodeStateTracer(self.env)  
@@ -75,6 +78,15 @@ class EVMSimulator:
         self.vm.state.lock_changes()
         checkpoint = self.vm.state.snapshot()
         return self._simulate_single_order(order), checkpoint
+    
+    def get_max_blob_gas_per_block(self) -> int:
+        vm_class_name = self.vm.__class__.__name__.lower()
+        if "cancun" in vm_class_name:
+            return CANCUN_MAX_BLOB_GAS
+        elif "prague" in vm_class_name:
+            return PRAGUE_MAX_BLOB_GAS
+        else:
+            raise ValueError(f"Cannot determine max blob gas per block for VM class {vm_class_name}")
 
     def _execute_tx(self, tx_data, accumulated_trace=None) -> OrderSimResult:
         tx = None
@@ -187,7 +199,7 @@ class EVMSimulator:
                 chain_id=1, nonce=nonce, gas_price=gas_price, gas=gas, to=to_addr.canonical_address,
                 value=value, data=data, access_list=access_list, y_parity=y_parity, r=r, s=s,
             )
-            return CancunTypedTransaction(1, inner_tx)
+            return PragueTypedTransaction(1, inner_tx)
         
         elif tx_type_int == 2:
             y_parity = self._safe_to_int(tx_data["y_parity"])
@@ -195,10 +207,10 @@ class EVMSimulator:
             max_priority_fee_per_gas = self._safe_to_int(tx_data["max_priority_fee_per_gas"])
             inner_tx = DynamicFeeTransaction(
                 chain_id=1, nonce=nonce, max_priority_fee_per_gas=max_priority_fee_per_gas,
-                max_fee_per_gas=max_fee_per_gas, gas=gas, to=self._safe_to_bytes(to_addr.canonical_address) if to_addr else b'',
+                max_fee_per_gas=max_fee_per_gas, gas=gas, to=self._safe_to_bytes(to_addr.canonical_address),
                 value=value, data=data, access_list=access_list, y_parity=y_parity, r=r, s=s
             )
-            return CancunTypedTransaction(2, inner_tx)
+            return PragueTypedTransaction(2, inner_tx)
         elif tx_type_int == 3:
             y_parity = self._safe_to_int(tx_data["y_parity"])
             max_fee_per_gas = self._safe_to_int(tx_data["max_fee_per_gas"])
@@ -208,11 +220,11 @@ class EVMSimulator:
 
             inner_tx = BlobTransaction(
                 chain_id=1, nonce=nonce, max_priority_fee_per_gas=max_priority_fee_per_gas,
-                max_fee_per_gas=max_fee_per_gas, gas=gas, to=self._safe_to_bytes(to_addr.canonical_address) if to_addr else b'',
+                max_fee_per_gas=max_fee_per_gas, gas=gas, to=self._safe_to_bytes(to_addr.canonical_address),
                 value=value, data=data, max_fee_per_blob_gas=max_fee_per_blob_gas,
                 blob_versioned_hashes=blob_versioned_hashes, access_list=access_list, y_parity=y_parity, r=r, s=s,
             )
-            return CancunTypedTransaction(3, inner_tx)
+            return PragueTypedTransaction(3, inner_tx)
         elif tx_type_int == 4:
             y_parity = self._safe_to_int(tx_data["y_parity"])
             max_fee_per_gas = self._safe_to_int(tx_data["max_fee_per_gas"])
@@ -221,7 +233,7 @@ class EVMSimulator:
 
             inner_tx = SetCodeTransaction(
                 chain_id=1, nonce=nonce, max_priority_fee_per_gas=max_priority_fee_per_gas, max_fee_per_gas=max_fee_per_gas,
-                gas=gas, to=self._safe_to_bytes(to_addr.canonical_address) if to_addr else b'', value=value, data=data,
+                gas=gas, to=self._safe_to_bytes(to_addr.canonical_address), value=value, data=data,
                 access_list=access_list, authorization_list=self._parse_authorization_list(authorization_list), y_parity=y_parity, 
                 r=r, s=s,
             )
@@ -245,19 +257,44 @@ class EVMSimulator:
             for entry in auth_list_raw
         ]
 
-    def _create_block_header(self) -> PragueBlockHeader:
-        return PragueBlockHeader(
-            block_number=self.context.block_number, timestamp=self.context.block_timestamp,
-            base_fee_per_gas=self.context.block_base_fee, gas_limit=self.context.block_gas_limit,
-            parent_hash=self._safe_to_bytes(self.context.parent_hash), uncles_hash=self._safe_to_bytes(self.context.uncles_hash),
-            state_root=self._safe_to_bytes(self.context.state_root), transaction_root=self._safe_to_bytes(self.context.transaction_root),
-            nonce=self._safe_to_bytes(self.context.nonce), coinbase=self._safe_to_bytes(self.context.coinbase),
-            difficulty=self.context.block_difficulty, withdrawals_root=self._safe_to_bytes(self.context.withdrawals_root),
-            gas_used=0, excess_blob_gas=self.context.excess_blob_gas, receipt_root=self._safe_to_bytes(self.context.receipt_root),
-            mix_hash=self._safe_to_bytes(self.context.mix_hash), parent_beacon_block_root=self._safe_to_bytes(self.context.parent_beacon_block_root),
-            bloom=self._safe_to_int(self.context.bloom), extra_data=self._safe_to_bytes(self.context.extra_data), 
-            requests_hash=self._safe_to_bytes(self.context.requests_hash)
-        )
+    def _create_block_header(self):
+        # Create a block header based on the VM's block class
+        parent_header = self.vm.get_header()
+        header_cls = type(parent_header)
+
+        all_fields = {
+            "block_number":             self.context.block_number,
+            "timestamp":                self.context.block_timestamp,
+            "base_fee_per_gas":         self.context.block_base_fee,
+            "gas_limit":                self.context.block_gas_limit,
+            "parent_hash":              self._safe_to_bytes(self.context.parent_hash),
+            "uncles_hash":              self._safe_to_bytes(self.context.uncles_hash),
+            "state_root":               self._safe_to_bytes(self.context.state_root),
+            "transaction_root":         self._safe_to_bytes(self.context.transaction_root),
+            "receipt_root":             self._safe_to_bytes(self.context.receipt_root),
+            "difficulty":               self.context.block_difficulty,
+            "gas_used":                 0,
+            "coinbase":                 self._safe_to_bytes(self.context.coinbase),
+            "nonce":                    self._safe_to_bytes(self.context.nonce),
+            "mix_hash":                 self._safe_to_bytes(self.context.mix_hash),
+            "extra_data":               self._safe_to_bytes(self.context.extra_data),
+            "parent_beacon_block_root": self._safe_to_bytes(self.context.parent_beacon_block_root),
+            "requests_hash":            self._safe_to_bytes(self.context.requests_hash),
+            "withdrawals_root":         self._safe_to_bytes(self.context.withdrawals_root),
+            "bloom":                    self._safe_to_int(self.context.bloom),
+            "excess_blob_gas":          self.context.excess_blob_gas,
+        }
+
+        # Inspect header_cls.__init__ to see which fields it supports
+        sig = inspect.signature(header_cls.__init__)
+        supported_kwargs = {
+            name: all_fields[name]
+            for name in sig.parameters
+            if name != "self" and name in all_fields and all_fields[name] is not None
+        }
+
+        return header_cls(**supported_kwargs)
+
 
     def _override_execution_context(self):
         # Set execution context parameters based on the simulation context for the current block
@@ -321,7 +358,7 @@ class EVMSimulator:
 
 
     def _safe_to_bytes(self, value) -> bytes:
-        if value is None:
+        if not value:
             return b''
         if isinstance(value, bytes):
             return value
@@ -481,7 +518,7 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
 
 #     # get the first order
 #     first_order = next((o for o in orders if o.id().value == "0x2ab3665b4b88be6d4d299d2384e26b36c50179a68eb0ba9483c0680e4d197e5f"), None)
-#     second_order = next((o for o in orders if o.id().value == "0x3c41a592347a917d6e2d72bf0cf47e2902d5ec4053c4d8cbe0505de8799a579c"), None)
+#     second_order = next((o for o in orders if o.id().value == "0xb6528aba210ee94a27c8e682a9488ca7b6c2918ccd928a0b1034f7c2874f6a3b"), None)
 #     # third_order = next((o for o in orders if o.id().value == "0x1912bb377d6a2e13c76b3a48ef6c5b793eda305943cdde0f685abe3a851d6b88"), None)
 #     # if not first_order or not second_order or not third_order:
 #     #     raise ValueError("Required orders not found in the provided list")
@@ -491,9 +528,9 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
 #     first_simulated_order = simulator._simulate_tx_order(first_order)
 #     logger.info(f"First order simulation result: {first_simulated_order.simulation_result.success}, gas used: {first_simulated_order.simulation_result.gas_used}, coinbase profit: {first_simulated_order.simulation_result.coinbase_profit}")
 
-#     # # Simulate second order
-#     # second_simulated_order = simulator._simulate_tx_order(second_order)
-#     # logger.info(f"Second order simulation result: {second_simulated_order.simulation_result.success}, gas used: {second_simulated_order.simulation_result.gas_used}, coinbase profit: {second_simulated_order.simulation_result.coinbase_profit}")
+#     # Simulate second order
+#     second_simulated_order = simulator._simulate_tx_order(second_order)
+#     logger.info(f"Second order simulation result: {second_simulated_order.simulation_result.success}, gas used: {second_simulated_order.simulation_result.gas_used}, coinbase profit: {second_simulated_order.simulation_result.coinbase_profit}")
 
 #     # # Simulate third order
 #     # third_simulated_order = simulator.simulate_tx_order(third_order)
