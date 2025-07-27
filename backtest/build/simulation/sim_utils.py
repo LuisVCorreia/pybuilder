@@ -32,6 +32,7 @@ class SimulationContext:
     parent_beacon_block_root: Optional[str] = None
     bloom: Optional[str] = None
     extra_data: Optional[str] = None
+    requests_hash: Optional[str] = None
 
     @classmethod
     def from_onchain_block(cls, onchain_block: dict, winning_bid_trace: dict = None) -> 'SimulationContext':
@@ -41,29 +42,30 @@ class SimulationContext:
 
         # Extract all the fields we need for proper block header construction
         context = cls(
-            block_number=onchain_block.get('number', 0),
-            block_timestamp=onchain_block.get('timestamp', 0),
-            block_base_fee=onchain_block.get('baseFeePerGas', 0),
-            block_gas_limit=onchain_block.get('gasLimit', 36000000),
+            block_number=onchain_block.get('number'),
+            block_timestamp=onchain_block.get('timestamp'),
+            block_base_fee=onchain_block.get('baseFeePerGas'),
+            block_gas_limit=onchain_block.get('gasLimit'),
             block_hash=onchain_block.get('hash'),
             parent_hash=onchain_block.get('parentHash'),
             chain_id=1,  # Ethereum mainnet
-            coinbase=onchain_block.get('miner', "0x0000000000000000000000000000000000000000"),
-            block_difficulty=onchain_block.get('difficulty', 0),
-            block_gas_used=onchain_block.get('gasUsed', 0),
+            coinbase=onchain_block.get('miner'),
+            block_difficulty=onchain_block.get('difficulty'),
+            block_gas_used=onchain_block.get('gasUsed'),
             withdrawals_root=onchain_block.get('withdrawalsRoot'),
             blob_gas_used=onchain_block.get('blobGasUsed'),
             excess_blob_gas=onchain_block.get('excessBlobGas'),
             prevrandao=onchain_block.get('prevRandao'),
-            uncles_hash=onchain_block.get('sha3Uncles', '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347'),
-            state_root=onchain_block.get('stateRoot', '0x' + '00' * 32),
-            transaction_root=onchain_block.get('transactionsRoot', '0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421'),
-            receipt_root=onchain_block.get('receiptsRoot', '0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421'),
-            nonce=onchain_block.get('nonce', '0x0000000000000000'),
+            uncles_hash=onchain_block.get('sha3Uncles'),
+            state_root=onchain_block.get('stateRoot'),
+            transaction_root=onchain_block.get('transactionsRoot'),
+            receipt_root=onchain_block.get('receiptsRoot'),
+            nonce=onchain_block.get('nonce'),
             mix_hash=onchain_block.get('mixHash'),
             parent_beacon_block_root=onchain_block.get('parentBeaconBlockRoot'),
-            bloom=onchain_block.get('logsBloom', '0x' + '00' * 256),
-            extra_data=onchain_block.get('extraData', '0x'),
+            bloom=onchain_block.get('logsBloom'),
+            extra_data=onchain_block.get('extraData'),
+            requests_hash=onchain_block.get('requestsHash')
         )
 
         # If we have winning bid trace, use the fee recipient from there

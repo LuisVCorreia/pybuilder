@@ -11,8 +11,10 @@ from boa.environment import Env
 from eth.abc import SignedTransactionAPI
 from eth.vm.forks.berlin.transactions import AccessListTransaction
 from eth.vm.forks.london.transactions import DynamicFeeTransaction
-from eth.vm.forks.cancun.transactions import BlobTransaction, CancunTypedTransaction, CancunLegacyTransaction
+from eth.vm.forks.prague.transactions import SetCodeTransaction, Authorization, PragueTypedTransaction, PragueLegacyTransaction
+from eth.vm.forks.cancun.transactions import BlobTransaction, CancunTypedTransaction
 from eth.vm.forks.cancun.headers import CancunBlockHeader
+from eth.vm.forks.prague.headers import PragueBlockHeader
 
 from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareBundleOrder
 from .sim_tree import SimTree, SimulatedResult, NonceKey
@@ -23,10 +25,10 @@ from .state_trace import UsedStateTrace
 logger = logging.getLogger(__name__)
 
 class EVMSimulator:
-    def __init__(self, simulation_context: SimulationContext, rpc_url: str, fetch_prev_hashes: bool = True):
+    def __init__(self, simulation_context: SimulationContext, rpc_url: str):
         self.context = simulation_context
         self.rpc = EthereumRPC(rpc_url)
-        self.env = Env(fast_mode_enabled=True, fork_try_prefetch_state=True)
+        self.env = Env(fast_mode_enabled=False, fork_try_prefetch_state=False)
         self.rpc_url = rpc_url
         self.vm = self.env.evm.vm
         self.state_tracer = PyEVMOpcodeStateTracer(self.env)  
@@ -75,6 +77,7 @@ class EVMSimulator:
         return self._simulate_single_order(order), checkpoint
 
     def _execute_tx(self, tx_data, accumulated_trace=None) -> OrderSimResult:
+        tx = None
         try:
             tx = self._create_pyevm_tx(tx_data)
             header = self._create_block_header()
@@ -138,7 +141,10 @@ class EVMSimulator:
 
         except Exception as e:
             self.state_tracer.cleanup()
-            logger.error(f"Transaction 0x{tx.hash.hex()} simulation failed during validation: {str(e)}")
+            tx_hash_str = tx.hash.hex() if tx is not None and hasattr(tx, "hash") else "unknown"
+            logger.error(
+                f"Transaction {tx_hash_str} simulation failed during validation: {str(e)}"
+            )
             return OrderSimResult(
                 success=False,
                 gas_used=0,
@@ -158,8 +164,18 @@ class EVMSimulator:
         gas = self._safe_to_int(tx_data["gas"])
         gas_price = self._safe_to_int(tx_data["gasPrice"])
         data = self._safe_to_bytes(tx_data["data"])
-        access_list = tx_data.get("accessList", [])
         nonce = self._safe_to_int(tx_data["nonce"])
+
+        if "access_list" in tx_data:
+            access_list = [
+                (
+                    Address(addr).canonical_address,
+                    [self._safe_to_int(k) for k in storage_keys]
+                )
+                for addr, storage_keys in tx_data['access_list']
+            ]
+        else:
+            access_list = []
 
         v = self._safe_to_int(tx_data.get("v"))
         r = self._safe_to_int(tx_data.get("r"))
@@ -171,7 +187,6 @@ class EVMSimulator:
                 chain_id=1, nonce=nonce, gas_price=gas_price, gas=gas, to=to_addr.canonical_address,
                 value=value, data=data, access_list=access_list, y_parity=y_parity, r=r, s=s,
             )
-            # Wrap in CancunTypedTransaction because you’re on the Cancun VM
             return CancunTypedTransaction(1, inner_tx)
         
         elif tx_type_int == 2:
@@ -189,31 +204,59 @@ class EVMSimulator:
             max_fee_per_gas = self._safe_to_int(tx_data["max_fee_per_gas"])
             max_priority_fee_per_gas = self._safe_to_int(tx_data["max_priority_fee_per_gas"])
             max_fee_per_blob_gas = self._safe_to_int(tx_data.get("max_fee_per_blob_gas"))
-            blob_hashes = tx_data.get("blob_versioned_hashes")
+            blob_versioned_hashes = tx_data.get("blob_versioned_hashes")
+
             inner_tx = BlobTransaction(
                 chain_id=1, nonce=nonce, max_priority_fee_per_gas=max_priority_fee_per_gas,
-                max_fee_per_gas=max_fee_per_gas, gas=gas, to=to_addr.canonical_address,
+                max_fee_per_gas=max_fee_per_gas, gas=gas, to=self._safe_to_bytes(to_addr.canonical_address) if to_addr else b'',
                 value=value, data=data, max_fee_per_blob_gas=max_fee_per_blob_gas,
-                blob_versioned_hashes=blob_hashes, access_list=access_list, y_parity=y_parity, r=r, s=s,
+                blob_versioned_hashes=blob_versioned_hashes, access_list=access_list, y_parity=y_parity, r=r, s=s,
             )
             return CancunTypedTransaction(3, inner_tx)
+        elif tx_type_int == 4:
+            y_parity = self._safe_to_int(tx_data["y_parity"])
+            max_fee_per_gas = self._safe_to_int(tx_data["max_fee_per_gas"])
+            max_priority_fee_per_gas = self._safe_to_int(tx_data["max_priority_fee_per_gas"])
+            authorization_list = tx_data.get("authorization_list", [])
+
+            inner_tx = SetCodeTransaction(
+                chain_id=1, nonce=nonce, max_priority_fee_per_gas=max_priority_fee_per_gas, max_fee_per_gas=max_fee_per_gas,
+                gas=gas, to=self._safe_to_bytes(to_addr.canonical_address) if to_addr else b'', value=value, data=data,
+                access_list=access_list, authorization_list=self._parse_authorization_list(authorization_list), y_parity=y_parity, 
+                r=r, s=s,
+            )
+            return PragueTypedTransaction(4, inner_tx)
         else:
-            return CancunLegacyTransaction(
+            return PragueLegacyTransaction(
                 nonce=nonce, gas_price=gas_price, gas=gas, to=to_addr.canonical_address,
                 value=value, data=data, v=v, r=r, s=s,
             )
+        
+    def _parse_authorization_list(self, auth_list_raw):
+        return [
+            Authorization(
+                self._safe_to_int(entry[0]),  # chain_id
+                self._safe_to_bytes(entry[1]),  # caller
+                self._safe_to_int(entry[2]),  # nonce
+                self._safe_to_int(entry[3]),  # signature_y
+                self._safe_to_int(entry[4]),  # signature_r
+                self._safe_to_int(entry[5]),  # signature_s
+            )
+            for entry in auth_list_raw
+        ]
 
-    def _create_block_header(self) -> CancunBlockHeader:
-        return CancunBlockHeader(
+    def _create_block_header(self) -> PragueBlockHeader:
+        return PragueBlockHeader(
             block_number=self.context.block_number, timestamp=self.context.block_timestamp,
             base_fee_per_gas=self.context.block_base_fee, gas_limit=self.context.block_gas_limit,
-            parent_hash=self.context.parent_hash, uncles_hash=self.context.uncles_hash,
-            state_root=self.context.state_root, transaction_root=self.context.transaction_root,
-            nonce=self.context.nonce, coinbase=self.context.coinbase,
-            difficulty=self.context.block_difficulty, withdrawals_root=self.context.withdrawals_root,
-            gas_used=0, excess_blob_gas=self.context.excess_blob_gas, receipt_root=self.context.receipt_root,
-            mix_hash=self.context.mix_hash, parent_beacon_block_root=self.context.parent_beacon_block_root,
-            bloom=self.context.bloom, extra_data=self.context.extra_data
+            parent_hash=self._safe_to_bytes(self.context.parent_hash), uncles_hash=self._safe_to_bytes(self.context.uncles_hash),
+            state_root=self._safe_to_bytes(self.context.state_root), transaction_root=self._safe_to_bytes(self.context.transaction_root),
+            nonce=self._safe_to_bytes(self.context.nonce), coinbase=self._safe_to_bytes(self.context.coinbase),
+            difficulty=self.context.block_difficulty, withdrawals_root=self._safe_to_bytes(self.context.withdrawals_root),
+            gas_used=0, excess_blob_gas=self.context.excess_blob_gas, receipt_root=self._safe_to_bytes(self.context.receipt_root),
+            mix_hash=self._safe_to_bytes(self.context.mix_hash), parent_beacon_block_root=self._safe_to_bytes(self.context.parent_beacon_block_root),
+            bloom=self._safe_to_int(self.context.bloom), extra_data=self._safe_to_bytes(self.context.extra_data), 
+            requests_hash=self._safe_to_bytes(self.context.requests_hash)
         )
 
     def _override_execution_context(self):
@@ -255,10 +298,17 @@ class EVMSimulator:
         if isinstance(value, bytes):
             return int.from_bytes(value, byteorder='big')
         if isinstance(value, str):
-            value = value.strip().lower()
-            if value == "0x" or value == "":
-                return 0
-            return int(value, 16)
+            value = value.strip()
+            if value.startswith("b'") or value.startswith('b"'):
+                try:
+                    # Safely parse as Python bytes literal
+                    value = ast.literal_eval(value)
+                    return int.from_bytes(value, byteorder='big')
+                except Exception as e:
+                    raise ValueError(f"Failed to parse bytes string: {value}") from e
+            if value.lower().startswith("0x"):
+                return int(value, 16)
+            return int(value)
         raise TypeError(f"Unsupported type for int conversion: {type(value)}")
 
 
@@ -397,7 +447,7 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
         
         # 3. Handle any orders that are still pending. They are unresolvable.
         for order_id, (order, _) in sim_tree.pending_orders.items():
-            logger.warning(f"Order {order_id} has unresolvable nonce dependencies.")
+            logger.debug(f"Order {order_id} has unresolvable nonce dependencies.")
             error_result = OrderSimResult(
                 success=False, gas_used=0, error=SimulationError.INVALID_NONCE,
                 error_message="Unresolvable nonce dependencies"
@@ -422,7 +472,7 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
 #     # then tx with hash tx:0x0de7a57fb278beca6c802e2e007c29df311127080e2e37a189a4a8702cf567c6
 
 #     # get the first order
-#     first_order = next((o for o in orders if o.id().value == "0xb05a3f2b8891db2ac45508cc1fb3d8504478b2f37059b970d0ba3d9af63bc223"), None)
+#     first_order = next((o for o in orders if o.id().value == "0xeeeaee6426d656ea22a8de2859128be8d944a700b97c3e6549db3e3be996f111"), None)
 #     second_order = next((o for o in orders if o.id().value == "0x3c41a592347a917d6e2d72bf0cf47e2902d5ec4053c4d8cbe0505de8799a579c"), None)
 #     # third_order = next((o for o in orders if o.id().value == "0x1912bb377d6a2e13c76b3a48ef6c5b793eda305943cdde0f685abe3a851d6b88"), None)
 #     # if not first_order or not second_order or not third_order:

@@ -289,21 +289,42 @@ class TxOrder(Order):
                         'gasPrice': safe_int_from_field(fields[3]),
                     }
                 elif tx_type == 0x03: # EIP-4844 Blob Transaction
-                    tx_body = decoded_payload[0]
-                    canonical_tx = tx_type.to_bytes(1, 'big') + rlp.encode(tx_body)
+                    fields = decoded_payload[0]
+                    canonical_tx = tx_type.to_bytes(1, 'big') + rlp.encode(fields)
                     tx_data = {
-                        'type': tx_type, 'chainId': safe_int_from_field(tx_body[0]),
-                        'nonce': safe_int_from_field(tx_body[1]), 'max_priority_fee_per_gas': safe_int_from_field(tx_body[2]),
-                        'max_fee_per_gas': safe_int_from_field(tx_body[3]), 'gas': safe_int_from_field(tx_body[4]),
-                        'to': tx_body[5] if tx_body[5] else b'', 'value': safe_int_from_field(tx_body[6]),
-                        'data': tx_body[7], 'access_list': tx_body[8],
-                        'max_fee_per_blob_gas': safe_int_from_field(tx_body[9]),
-                        'blob_versioned_hashes': tx_body[10],
-                        'y_parity': safe_int_from_field(tx_body[11]), 'r': safe_int_from_field(tx_body[12]),
-                        's': safe_int_from_field(tx_body[13]),
+                        'type': tx_type, 'chainId': safe_int_from_field(fields[0]),
+                        'nonce': safe_int_from_field(fields[1]), 'max_priority_fee_per_gas': safe_int_from_field(fields[2]),
+                        'max_fee_per_gas': safe_int_from_field(fields[3]), 'gas': safe_int_from_field(fields[4]),
+                        'to': fields[5] if fields[5] else b'', 'value': safe_int_from_field(fields[6]),
+                        'data': fields[7], 'access_list': fields[8],
+                        'max_fee_per_blob_gas': safe_int_from_field(fields[9]),
+                        'blob_versioned_hashes': fields[10],
+                        'y_parity': safe_int_from_field(fields[11]), 'r': safe_int_from_field(fields[12]),
+                        's': safe_int_from_field(fields[13]),
                         # Add gasPrice for compatibility, set to the max fee cap.
-                        'gasPrice': safe_int_from_field(tx_body[3]),
+                        'gasPrice': safe_int_from_field(fields[3]),
                     }
+                elif tx_type == 0x04:  # EIP-7702 Set Code Transaction
+                    fields = decoded_payload
+                    #  print fields for debugging
+                    tx_data = {
+                        'type': tx_type, 'chainId': safe_int_from_field(fields[0]),
+                        'nonce': safe_int_from_field(fields[1]),
+                        'max_priority_fee_per_gas': safe_int_from_field(fields[2]),
+                        'max_fee_per_gas': safe_int_from_field(fields[3]),
+                        'gas': safe_int_from_field(fields[4]),
+                        'to': fields[5] if fields[5] else b'',
+                        'value': safe_int_from_field(fields[6]),
+                        'data': fields[7],
+                        'access_list': fields[8],
+                        'authorization_list': fields[9],
+                        'y_parity': safe_int_from_field(fields[10]),
+                        'r': safe_int_from_field(fields[11]),
+                        's': safe_int_from_field(fields[12]),
+                        # For compatibility
+                        'gasPrice': safe_int_from_field(fields[3]),
+                    }
+
                 else:
                     raise ValueError(f"Unsupported transaction type: {tx_type}")
 
