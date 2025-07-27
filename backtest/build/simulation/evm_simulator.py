@@ -93,8 +93,6 @@ class EVMSimulator:
             receipt     = self.vm.make_receipt(header, tx, computation, self.vm.state)
             self.vm.validate_receipt(receipt)
 
-            # receipt, computation = self.env.evm.vm.apply_transaction(header, tx)
-
             # Finish state tracing and get the trace (pass tx for simple transfer handling)
             tx_state_trace = self.state_tracer.finish_tracing(computation, tx)
             
@@ -103,20 +101,27 @@ class EVMSimulator:
                 final_trace.append_trace(tx_state_trace)
             else:
                 final_trace = tx_state_trace
-            
-            # with open("state_trace_pybuilder.txt", "a") as f:
-            #     f.write(f"Transaction 0x{tx.hash.hex()} state trace:\n")
-            #     f.write(final_trace.summary() + "\n")
-            
+
             # Clean up tracing (restore original opcodes)
             self.state_tracer.cleanup()
 
             final_coinbase_balance = self.env.get_balance(coinbase_addr)
             coinbase_profit = self._calculate_coinbase_profit(initial_coinbase_balance, final_coinbase_balance)
 
-            if computation.is_error:
-                error_message = f"Transaction 0x{tx.hash.hex()} failed: {computation.error}"
-                logger.warning(error_message)
+            if computation.is_error and receipt.gas_used == 0:
+                # Note: If tx reverted but used gas, we don't treat it as an error
+                self.state_tracer.cleanup()
+                logger.error(f"Transaction 0x{tx.hash.hex()} simulation failed during validation: {str(e)}")
+                return OrderSimResult(
+                    success=False,
+                    gas_used=0,
+                    coinbase_profit=0,
+                    blob_gas_used=0,
+                    paid_kickbacks=0,
+                    error=SimulationError.VALIDATION_ERROR,
+                    error_message=str(e),
+                    state_trace=accumulated_trace  # Return accumulated trace even on failure
+                )
 
 
             return OrderSimResult(
@@ -132,6 +137,7 @@ class EVMSimulator:
             )
 
         except Exception as e:
+            self.state_tracer.cleanup()
             logger.error(f"Transaction 0x{tx.hash.hex()} simulation failed during validation: {str(e)}")
             return OrderSimResult(
                 success=False,

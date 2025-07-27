@@ -304,8 +304,7 @@ class OrderingBuilder:
 
             # Re-insert order with updated simulation value for retry
             # In a real implementation, this would use the actual execution result
-            logger.info(f"Retrying order {order_id} (attempt {attempt_count + 1}/{self.config.failed_order_retries})")
-            logger.info(error)
+            logger.debug(f"Retrying order {order_id} (attempt {attempt_count + 1}/{self.config.failed_order_retries})")
             order_attempts[order_id] += 1
             order_store.insert_order(sim_order)
             
@@ -314,7 +313,7 @@ class OrderingBuilder:
             if self.config.drop_failed_orders:
                 failed_orders.add(order_id)
             
-            logger.info(
+            logger.debug(
                 f"Order {order_id} failed permanently: {error} "
                 f"(attempts: {attempt_count + 1})"
             )

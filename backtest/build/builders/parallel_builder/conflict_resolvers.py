@@ -113,7 +113,7 @@ class ConflictResolver:
                 continue
 
             try:
-                sim_ord, _ = self.evm_simulator.simulate_and_commit_order(order.order)
+                sim_ord, _ = self.evm_simulator.simulate_order(order.order)
             except Exception as exc:
                 logger.warning("Simulator exception on order %d: %s", idx, exc)
                 seq_profits.append((idx, 0))

@@ -183,6 +183,12 @@ class ParallelBuilder:
         )
         logger.debug("Group sizes: %s", sizes)
 
+        # print each order in each group
+        for group in conflict_groups:
+            logger.debug("Group %s: %d orders: %s",
+                        group.id, len(group.orders),
+                        ",    ".join(str(order.order.id()) for order in group.orders))
+
 
 def run_parallel_builder(
     simulated_orders: List[SimulatedOrder],

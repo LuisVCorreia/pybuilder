@@ -48,20 +48,6 @@ class PyEVMOpcodeStateTracer:
             return tx.from_
         return None
     
-    def start_tracing_for_computation_class(self, computation_class) -> None:
-        """
-        Start tracing by patching a specific computation class.
-        """
-        self.collector.reset()
-        
-        if self._original_opcodes is None:
-            self._original_opcodes = computation_class.opcodes.copy()
-        
-        if not self._patched:
-            patch_evm_opcodes_for_tracing(computation_class, self.collector)
-            self._patched = True
-            logger.debug("EVM opcodes patched for state tracing")
-    
     def finish_tracing(self, computation, tx: SignedTransactionAPI = None) -> UsedStateTrace:
         """
         Complete tracing and return the collected state trace.
