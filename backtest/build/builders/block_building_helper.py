@@ -4,7 +4,7 @@ import copy
 import time
 from typing import List, Dict, Optional, Callable
 
-from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue
+from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue, MAX_BLOB_GAS_PER_BLOCK
 from backtest.build.simulation.evm_simulator import EVMSimulator
 from .block_result import BlockResult, BlockTrace
 from backtest.common.order import OrderId
@@ -127,7 +127,13 @@ class BlockBuildingHelper:
                     f"Gas limit exceeded: {self.gas_used + simulated_gas} > {self.context.block_gas_limit}",
                     "gas_limit_exceeded"
                 )
-            
+
+            if self.blob_gas_used + simulated_blob_gas > MAX_BLOB_GAS_PER_BLOCK:
+                raise ExecutionError(
+                    f"Blob gas limit exceeded: {self.blob_gas_used + simulated_blob_gas} > {MAX_BLOB_GAS_PER_BLOCK}",
+                    "blob_gas_limit_exceeded"
+                )
+                    
             # Update block state
             self.gas_used += simulated_gas
             self.coinbase_profit += simulated_profit

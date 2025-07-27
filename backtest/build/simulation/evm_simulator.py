@@ -18,7 +18,7 @@ from eth.vm.forks.prague.headers import PragueBlockHeader
 
 from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareBundleOrder
 from .sim_tree import SimTree, SimulatedResult, NonceKey
-from .sim_utils import SimulationContext, SimulatedOrder, SimValue, OrderSimResult, SimulationError
+from .sim_utils import SimulationContext, SimulatedOrder, SimValue, OrderSimResult, SimulationError, DATA_GAS_PER_BLOB
 from .pyevm_opcode_state_tracer import PyEVMOpcodeStateTracer
 from .state_trace import UsedStateTrace
 
@@ -131,7 +131,7 @@ class EVMSimulator:
                 success=True,
                 gas_used=receipt.gas_used,
                 coinbase_profit=coinbase_profit,
-                blob_gas_used=getattr(computation, 'blob_gas_used', 0),
+                blob_gas_used=self._calculate_blob_gas_used(tx_data),
                 paid_kickbacks=0,
                 error=None,
                 error_message=None,
@@ -272,6 +272,14 @@ class EVMSimulator:
             self.env.evm.vm.state.execution_context._excess_blob_gas = self._safe_to_int(self.context.excess_blob_gas)
 
         # prev_hashes and chain_id are handled by the patched titanoboa, so we do not set them here (this enables caching)
+
+    def _calculate_blob_gas_used(self, tx_data: dict) -> int:
+        tx_type = self._safe_to_int(tx_data.get("type", 0))
+        if tx_type == 3:  # BlobTransaction
+            versioned_hashes = tx_data.get("blob_versioned_hashes", [])
+            return len(versioned_hashes) * DATA_GAS_PER_BLOB
+        return 0
+
 
     def _convert_result_to_simulated_order(self, order: Order, result: OrderSimResult) -> SimulatedOrder:
         if result.success:
@@ -472,7 +480,7 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
 #     # then tx with hash tx:0x0de7a57fb278beca6c802e2e007c29df311127080e2e37a189a4a8702cf567c6
 
 #     # get the first order
-#     first_order = next((o for o in orders if o.id().value == "0xeeeaee6426d656ea22a8de2859128be8d944a700b97c3e6549db3e3be996f111"), None)
+#     first_order = next((o for o in orders if o.id().value == "0x2ab3665b4b88be6d4d299d2384e26b36c50179a68eb0ba9483c0680e4d197e5f"), None)
 #     second_order = next((o for o in orders if o.id().value == "0x3c41a592347a917d6e2d72bf0cf47e2902d5ec4053c4d8cbe0505de8799a579c"), None)
 #     # third_order = next((o for o in orders if o.id().value == "0x1912bb377d6a2e13c76b3a48ef6c5b793eda305943cdde0f685abe3a851d6b88"), None)
 #     # if not first_order or not second_order or not third_order:
