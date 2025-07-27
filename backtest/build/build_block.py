@@ -22,27 +22,11 @@ class LandedBlockFromDBOrdersSource:
 
         block_data.filter_late_orders(args.block_building_time_ms)
 
-        if args.show_missing:
-            self.show_missing_txs(block_data)
-
         print(f"Block: {block_data.block_number} {block_data.onchain_block.get('hash')}")
         print(f"bid value: {block_data.winning_bid_trace.get('value')}")
         print(f"builder pubkey: {block_data.winning_bid_trace.get('builder_pubkey')}")
 
         return block_data
-
-    def show_missing_txs(self, block_data):
-        missing_txs = block_data.search_missing_txs_on_available_orders()
-        if missing_txs:
-            logger.info(f"{len(missing_txs)} of txs by hashes missing on available orders")
-            for missing_tx in missing_txs:
-                logger.info(f"Tx: {missing_tx}")
-        
-        missing_nonce_txs = block_data.search_missing_account_nonce_on_available_orders()
-        if missing_nonce_txs:
-            logger.info(f"\n{len(missing_nonce_txs)} of txs by nonce pairs missing on available orders")
-            for missing_nonce_tx in missing_nonce_txs:
-                logger.info(f"Tx: {missing_nonce_tx[0]}, Account: {missing_nonce_tx[1]['account']}, Nonce: {missing_nonce_tx[1]['nonce']}")
 
 def run_backtest(args, config):
     logger.info("Starting backtest block build...")
@@ -72,13 +56,26 @@ def run_backtest(args, config):
     logger.info("Simulating orders...")
     simulated_orders = simulate_orders(order_objects, evm_simulator)
     logger.info(f"Simulation complete. Got {len(simulated_orders)} simulated orders.")
-    
+
     # Print simulation results
     successful_sims = [sim for sim in simulated_orders if sim.simulation_result.success]
     failed_sims = [sim for sim in simulated_orders if not sim.simulation_result.success]
-    
+
+    # Save successful simulation state traces to file
+    with open("state_trace_pybuilder.txt", "a") as f:
+        for sim in successful_sims:
+            f.write(f"Order {sim.order.id()} state trace:\n")
+            f.write(sim.simulation_result.state_trace.summary() + "\n")
+
     logger.info(f"Successful simulations: {len(successful_sims)}")
     logger.info(f"Failed simulations: {len(failed_sims)}")
+
+    with open("pybuilder_sim_results.txt", "w") as f:
+        for sim in simulated_orders:
+            f.write(f"Simulating order: {sim.order.id()}\n")
+            f.write(f"Simulation result: true, "
+                    f"gas used: {sim.sim_value.gas_used}, "
+                    f"coinbase profit: {sim.sim_value.coinbase_profit}\n")
 
     if successful_sims:
         total_profit = sum(sim.sim_value.coinbase_profit for sim in successful_sims)
@@ -92,14 +89,6 @@ def run_backtest(args, config):
             logger.info(f"Total blob gas used: {total_blob_gas:,}")
         if total_kickbacks > 0:
             logger.info(f"Total kickbacks paid: {total_kickbacks / 10**18:.6f} ETH")
-    
-    # Show failed simulations for debugging
-    if failed_sims:
-        logger.info("Failed simulations:")
-        for sim in failed_sims:
-            error_info = sim.simulation_result.error if sim.simulation_result.error else "UNKNOWN"
-            error_msg = sim.simulation_result.error_message or "No error message"
-            logger.info(f"  Order {sim.order.id()}: {error_info} - {error_msg}")
 
     # Run builders
     logger.info("Running builders...")
