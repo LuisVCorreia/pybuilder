@@ -1,6 +1,6 @@
 from decimal import Decimal
 import logging
-from typing import List, Optional
+from typing import List
 from hexbytes import HexBytes
 import ast
 import inspect
@@ -10,12 +10,6 @@ from boa.vm.py_evm import Address
 from boa.rpc import EthereumRPC, to_hex
 from boa.environment import Env
 from eth.abc import SignedTransactionAPI
-from eth.vm.forks.berlin.transactions import AccessListTransaction
-from eth.vm.forks.london.transactions import DynamicFeeTransaction
-from eth.vm.forks.prague.transactions import SetCodeTransaction, Authorization, PragueTypedTransaction, PragueLegacyTransaction
-from eth.vm.forks.cancun.transactions import BlobTransaction, CancunTypedTransaction
-from eth.vm.forks.berlin.transactions import TypedTransaction
-from eth.vm.forks.prague.headers import PragueBlockHeader
 from eth.vm.forks.prague.constants import MAX_BLOB_GAS_PER_BLOCK as PRAGUE_MAX_BLOB_GAS
 from eth.vm.forks.cancun.constants import MAX_BLOB_GAS_PER_BLOCK as CANCUN_MAX_BLOB_GAS
 
@@ -88,10 +82,8 @@ class EVMSimulator:
         else:
             raise ValueError(f"Cannot determine max blob gas per block for VM class {vm_class_name}")
 
-    def _execute_tx(self, tx_data, accumulated_trace=None) -> OrderSimResult:
-        tx = None
+    def _execute_tx(self, tx: SignedTransactionAPI, accumulated_trace=None) -> OrderSimResult:
         try:
-            tx = self._create_pyevm_tx(tx_data)
             header = self._create_block_header()
 
             coinbase_addr = self.context.coinbase
@@ -143,7 +135,7 @@ class EVMSimulator:
                 success=True,
                 gas_used=receipt.gas_used,
                 coinbase_profit=coinbase_profit,
-                blob_gas_used=self._calculate_blob_gas_used(tx_data),
+                blob_gas_used=self._calculate_blob_gas_used(tx),
                 paid_kickbacks=0,
                 error=None,
                 error_message=None,
@@ -167,95 +159,6 @@ class EVMSimulator:
                 error_message=str(e),
                 state_trace=accumulated_trace  # Return accumulated trace even on failure
             )
-
-
-    def _create_pyevm_tx(self, tx_data: dict) -> SignedTransactionAPI:
-        tx_type_int = self._safe_to_int(tx_data.get("type", 0))
-        to_addr = Address(tx_data["to"]) if tx_data["to"] else None
-        value = self._safe_to_int(tx_data["value"])
-        gas = self._safe_to_int(tx_data["gas"])
-        gas_price = self._safe_to_int(tx_data["gasPrice"])
-        data = self._safe_to_bytes(tx_data["data"])
-        nonce = self._safe_to_int(tx_data["nonce"])
-
-        if "access_list" in tx_data:
-            access_list = [
-                (
-                    Address(addr).canonical_address,
-                    [self._safe_to_int(k) for k in storage_keys]
-                )
-                for addr, storage_keys in tx_data['access_list']
-            ]
-        else:
-            access_list = []
-
-        v = self._safe_to_int(tx_data.get("v"))
-        r = self._safe_to_int(tx_data.get("r"))
-        s = self._safe_to_int(tx_data.get("s"))
-
-        if tx_type_int == 1:
-            y_parity = v & 1
-            inner_tx = AccessListTransaction(
-                chain_id=1, nonce=nonce, gas_price=gas_price, gas=gas, to=to_addr.canonical_address,
-                value=value, data=data, access_list=access_list, y_parity=y_parity, r=r, s=s,
-            )
-            return PragueTypedTransaction(1, inner_tx)
-        
-        elif tx_type_int == 2:
-            y_parity = self._safe_to_int(tx_data["y_parity"])
-            max_fee_per_gas = self._safe_to_int(tx_data["max_fee_per_gas"])
-            max_priority_fee_per_gas = self._safe_to_int(tx_data["max_priority_fee_per_gas"])
-            inner_tx = DynamicFeeTransaction(
-                chain_id=1, nonce=nonce, max_priority_fee_per_gas=max_priority_fee_per_gas,
-                max_fee_per_gas=max_fee_per_gas, gas=gas, to=self._safe_to_bytes(to_addr.canonical_address),
-                value=value, data=data, access_list=access_list, y_parity=y_parity, r=r, s=s
-            )
-            return PragueTypedTransaction(2, inner_tx)
-        elif tx_type_int == 3:
-            y_parity = self._safe_to_int(tx_data["y_parity"])
-            max_fee_per_gas = self._safe_to_int(tx_data["max_fee_per_gas"])
-            max_priority_fee_per_gas = self._safe_to_int(tx_data["max_priority_fee_per_gas"])
-            max_fee_per_blob_gas = self._safe_to_int(tx_data.get("max_fee_per_blob_gas"))
-            blob_versioned_hashes = tx_data.get("blob_versioned_hashes")
-
-            inner_tx = BlobTransaction(
-                chain_id=1, nonce=nonce, max_priority_fee_per_gas=max_priority_fee_per_gas,
-                max_fee_per_gas=max_fee_per_gas, gas=gas, to=self._safe_to_bytes(to_addr.canonical_address),
-                value=value, data=data, max_fee_per_blob_gas=max_fee_per_blob_gas,
-                blob_versioned_hashes=blob_versioned_hashes, access_list=access_list, y_parity=y_parity, r=r, s=s,
-            )
-            return PragueTypedTransaction(3, inner_tx)
-        elif tx_type_int == 4:
-            y_parity = self._safe_to_int(tx_data["y_parity"])
-            max_fee_per_gas = self._safe_to_int(tx_data["max_fee_per_gas"])
-            max_priority_fee_per_gas = self._safe_to_int(tx_data["max_priority_fee_per_gas"])
-            authorization_list = tx_data.get("authorization_list", [])
-
-            inner_tx = SetCodeTransaction(
-                chain_id=1, nonce=nonce, max_priority_fee_per_gas=max_priority_fee_per_gas, max_fee_per_gas=max_fee_per_gas,
-                gas=gas, to=self._safe_to_bytes(to_addr.canonical_address), value=value, data=data,
-                access_list=access_list, authorization_list=self._parse_authorization_list(authorization_list), y_parity=y_parity, 
-                r=r, s=s,
-            )
-            return PragueTypedTransaction(4, inner_tx)
-        else:
-            return PragueLegacyTransaction(
-                nonce=nonce, gas_price=gas_price, gas=gas, to=to_addr.canonical_address,
-                value=value, data=data, v=v, r=r, s=s,
-            )
-        
-    def _parse_authorization_list(self, auth_list_raw):
-        return [
-            Authorization(
-                self._safe_to_int(entry[0]),  # chain_id
-                self._safe_to_bytes(entry[1]),  # caller
-                self._safe_to_int(entry[2]),  # nonce
-                self._safe_to_int(entry[3]),  # signature_y
-                self._safe_to_int(entry[4]),  # signature_r
-                self._safe_to_int(entry[5]),  # signature_s
-            )
-            for entry in auth_list_raw
-        ]
 
     def _create_block_header(self):
         # Create a block header based on the VM's block class
@@ -308,15 +211,10 @@ class EVMSimulator:
         if self.context.excess_blob_gas is not None:
             self.env.evm.vm.state.execution_context._excess_blob_gas = self._safe_to_int(self.context.excess_blob_gas)
 
-        # prev_hashes and chain_id are handled by the patched titanoboa, so we do not set them here (this enables caching)
+        # prev_hashes and chain_id are handled by the patched titanoboa, so we do not set them here
 
-    def _calculate_blob_gas_used(self, tx_data: dict) -> int:
-        tx_type = self._safe_to_int(tx_data.get("type", 0))
-        if tx_type == 3:  # BlobTransaction
-            versioned_hashes = tx_data.get("blob_versioned_hashes", [])
-            return len(versioned_hashes) * DATA_GAS_PER_BLOB
-        return 0
-
+    def _calculate_blob_gas_used(self, tx: SignedTransactionAPI) -> int:
+        return len(tx.blob_versioned_hashes) * DATA_GAS_PER_BLOB if tx.type_id == 3 else 0
 
     def _convert_result_to_simulated_order(self, order: Order, result: OrderSimResult) -> SimulatedOrder:
         if result.success:
@@ -403,8 +301,8 @@ class EVMSimulator:
     def _simulate_tx_order(self, order: TxOrder, accumulated_trace=None) -> SimulatedOrder:
         logger.debug(f"Simulating transaction {order.id()}")
         try:
-            tx_data = order.get_transaction_data()
-            result = self._execute_tx(tx_data, accumulated_trace)
+            tx = order.get_vm_transaction()
+            result = self._execute_tx(tx, accumulated_trace)
             logger.debug(f"Simulation result: {result.success}, gas used: {result.gas_used}, coinbase profit: {result.coinbase_profit}")
             return self._convert_result_to_simulated_order(order, result)
         except Exception as e:
@@ -417,7 +315,7 @@ class EVMSimulator:
         combined_trace = accumulated_trace.copy() if accumulated_trace else None
         
         for child_order, optional in order.child_orders:
-            res = self._execute_tx(child_order.get_transaction_data(), combined_trace)
+            res = self._execute_tx(child_order.get_vm_transaction(), combined_trace)
             if not res.success and not optional:
                 return self._convert_result_to_simulated_order(order, res)
             if res.success:

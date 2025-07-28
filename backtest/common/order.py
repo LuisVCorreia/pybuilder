@@ -1,17 +1,23 @@
 import enum
 import uuid
 from dataclasses import dataclass
-from typing import Any, List, Union, Dict, Tuple, Optional
-from eth_utils.crypto import keccak
+from typing import Any, List, Union, Dict, Tuple
 import rlp
 from rlp.exceptions import DecodingError
 import pandas as pd
 import logging
+
+from web3 import Web3
 from ..fetch.root_provider import RootProvider
-from eth_account import Account
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 import json
+
+from eth.abc import SignedTransactionAPI
+from eth.vm.forks.prague.transactions import SetCodeTransaction, PragueTypedTransaction, PragueLegacyTransaction
+from eth.vm.forks.berlin.transactions import AccessListTransaction
+from eth.vm.forks.london.transactions import DynamicFeeTransaction
+from eth.vm.forks.cancun.transactions import BlobTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -212,31 +218,44 @@ class Order:
 
 class TxOrder(Order):
     """
-    Represents a single transaction order.
-
-    The raw transaction is decoded once upon creation, and the structured
-    data is stored for efficient access.
+    Represents a single transaction order, holding a fully parsed py-evm transaction object.
     """
-    def __init__(self, timestamp_ms: int, raw_tx: bytes, tx_data: Dict[str, Any], canonical_tx: Optional[bytes] = None):
+    def __init__(self, timestamp_ms: int, raw_tx: bytes, tx_object: SignedTransactionAPI):
         self.timestamp_ms = timestamp_ms
         self.raw_tx = raw_tx
-        # Store the fully decoded transaction data
-        self.tx_data = tx_data
-        # The transaction payload used for hashing and signature recovery
-        self.canonical_tx = canonical_tx if canonical_tx is not None else raw_tx
-
-        # For convenience and backward compatibility within the class
-        self.sender = self.tx_data['from']
-        self.to = self.tx_data.get('to')
-        self.nonce = self.tx_data['nonce']
-        self.max_fee_per_gas = self.tx_data.get('maxFeePerGas', self.tx_data.get('gasPrice', 0))
+        self.tx_obj: SignedTransactionAPI = tx_object
 
     def id(self) -> OrderId:
-        txhash = keccak(self.canonical_tx)
-        return OrderId.from_tx(txhash)
+        return OrderId.from_tx(self.tx_obj.hash)
 
     def order_type(self) -> OrderType:
         return OrderType.TX
+
+    def can_execute_with_block_base_fee(self, block_base_fee: int) -> bool:
+        """Checks if the transaction's fee cap is sufficient for the block's base fee."""
+        return self.tx_obj.max_fee_per_gas >= block_base_fee
+
+    def nonces(self) -> List[TxNonce]:
+        """Returns the nonce this transaction depends on."""
+        checksum_address = Web3.to_checksum_address(self.tx_obj.sender.hex())
+        return [TxNonce(address=checksum_address, nonce=self.tx_obj.nonce, optional=False)]
+
+    def transactions(self) -> List[Dict[str, Any]]:
+        """Returns a list containing this transaction's summary."""
+        tx_hash = self.id().value
+        return [{
+            'hash': tx_hash,
+            'from': self.tx_obj.sender.hex(),
+            'to': self.tx_obj.to.hex() if self.tx_obj.to else None,
+            'nonce': self.tx_obj.nonce,
+            'raw_tx': f"0x{self.raw_tx.hex()}"
+        }]
+
+    def get_vm_transaction(self) -> SignedTransactionAPI:
+        """
+        Returns the pre-parsed transaction object ready for EVM simulation.
+        """
+        return self.tx_obj
 
     def order_data(self) -> Dict[str, Any]:
         return {
@@ -248,133 +267,46 @@ class TxOrder(Order):
     @classmethod
     def from_raw(cls, timestamp_ms: int, raw_tx: bytes) -> 'TxOrder':
         """
-        Decodes a raw transaction ONCE, extracts all relevant fields with their
-        correct data types (bytes, int, list), recovers the sender, and
-        creates a TxOrder instance ready for EVM simulation.
+        Decodes a raw transaction using RLP sedes and wraps it in the final
+        py-evm object (PragueLegacy/PragueTyped) ready for simulation.
         """
         if not raw_tx:
             raise ValueError("Empty transaction data")
 
         try:
-            tx_data: Dict[str, Any] = {}
-            canonical_tx = raw_tx
             first_byte = raw_tx[0]
+            final_tx_obj: SignedTransactionAPI = None
 
             if first_byte <= 0x7f:  # Typed Transaction
                 tx_type = first_byte
                 payload = raw_tx[1:]
-                decoded_payload = rlp.decode(payload)
+                inner_tx = None
 
-                if tx_type == 0x01: # EIP-2930
-                    fields = decoded_payload
-                    tx_data = {
-                        'type': tx_type, 'chainId': safe_int_from_field(fields[0]),
-                        'nonce': safe_int_from_field(fields[1]), 'gasPrice': safe_int_from_field(fields[2]),
-                        'gas': safe_int_from_field(fields[3]), 'to': fields[4] if fields[4] else b'',
-                        'value': safe_int_from_field(fields[5]), 'data': fields[6],
-                        'access_list': fields[7], 'v': safe_int_from_field(fields[8]),
-                        'r': safe_int_from_field(fields[9]), 's': safe_int_from_field(fields[10]),
-                    }
-                elif tx_type == 0x02: # EIP-1559
-                    fields = decoded_payload
-                    tx_data = {
-                        'type': tx_type, 'chainId': safe_int_from_field(fields[0]),
-                        'nonce': safe_int_from_field(fields[1]), 'max_priority_fee_per_gas': safe_int_from_field(fields[2]),
-                        'max_fee_per_gas': safe_int_from_field(fields[3]), 'gas': safe_int_from_field(fields[4]),
-                        'to': fields[5] if fields[5] else b'', 'value': safe_int_from_field(fields[6]),
-                        'data': fields[7], 'access_list': fields[8],
-                        'y_parity': safe_int_from_field(fields[9]), 'r': safe_int_from_field(fields[10]),
-                        's': safe_int_from_field(fields[11]),
-                        # Add gasPrice for compatibility, set to the max fee cap.
-                        'gasPrice': safe_int_from_field(fields[3]),
-                    }
-                elif tx_type == 0x03: # EIP-4844 Blob Transaction
-                    fields = decoded_payload[0]
-                    canonical_tx = tx_type.to_bytes(1, 'big') + rlp.encode(fields)
-                    tx_data = {
-                        'type': tx_type, 'chainId': safe_int_from_field(fields[0]),
-                        'nonce': safe_int_from_field(fields[1]), 'max_priority_fee_per_gas': safe_int_from_field(fields[2]),
-                        'max_fee_per_gas': safe_int_from_field(fields[3]), 'gas': safe_int_from_field(fields[4]),
-                        'to': fields[5] if fields[5] else b'', 'value': safe_int_from_field(fields[6]),
-                        'data': fields[7], 'access_list': fields[8],
-                        'max_fee_per_blob_gas': safe_int_from_field(fields[9]),
-                        'blob_versioned_hashes': fields[10],
-                        'y_parity': safe_int_from_field(fields[11]), 'r': safe_int_from_field(fields[12]),
-                        's': safe_int_from_field(fields[13]),
-                        # Add gasPrice for compatibility, set to the max fee cap.
-                        'gasPrice': safe_int_from_field(fields[3]),
-                    }
-                elif tx_type == 0x04:  # EIP-7702 Set Code Transaction
-                    fields = decoded_payload
-                    #  print fields for debugging
-                    tx_data = {
-                        'type': tx_type, 'chainId': safe_int_from_field(fields[0]),
-                        'nonce': safe_int_from_field(fields[1]),
-                        'max_priority_fee_per_gas': safe_int_from_field(fields[2]),
-                        'max_fee_per_gas': safe_int_from_field(fields[3]),
-                        'gas': safe_int_from_field(fields[4]),
-                        'to': fields[5] if fields[5] else b'',
-                        'value': safe_int_from_field(fields[6]),
-                        'data': fields[7],
-                        'access_list': fields[8],
-                        'authorization_list': fields[9],
-                        'y_parity': safe_int_from_field(fields[10]),
-                        'r': safe_int_from_field(fields[11]),
-                        's': safe_int_from_field(fields[12]),
-                        # For compatibility
-                        'gasPrice': safe_int_from_field(fields[3]),
-                    }
-
+                if tx_type == 0x01:
+                    inner_tx = rlp.decode(payload, sedes=AccessListTransaction)
+                elif tx_type == 0x02:
+                    inner_tx = rlp.decode(payload, sedes=DynamicFeeTransaction)
+                elif tx_type == 0x03:
+                    wrapper = rlp.decode(payload)
+                    inner_payload = rlp.encode(wrapper[0])
+                    inner_tx = rlp.decode(inner_payload, sedes=BlobTransaction)
+                elif tx_type == 0x04:
+                    inner_tx = rlp.decode(payload, sedes=SetCodeTransaction)
                 else:
                     raise ValueError(f"Unsupported transaction type: {tx_type}")
 
+                # Wrap the inner transaction to create the final, usable object
+                final_tx_obj = PragueTypedTransaction(tx_type, inner_tx)
+            
             else:  # Legacy Transaction
-                fields = rlp.decode(raw_tx)
-                tx_data = {
-                    'type': 0, 'nonce': safe_int_from_field(fields[0]),
-                    'gasPrice': safe_int_from_field(fields[1]), # Use 'gasPrice' for consistency
-                    'gas': safe_int_from_field(fields[2]), 'to': fields[3] if fields[3] else b'',
-                    'value': safe_int_from_field(fields[4]), 'data': fields[5],
-                    'v': safe_int_from_field(fields[6]), 'r': safe_int_from_field(fields[7]),
-                    's': safe_int_from_field(fields[8]),
-                }
+                # Legacy transactions are decoded directly into their final form
+                final_tx_obj = rlp.decode(raw_tx, sedes=PragueLegacyTransaction)
 
-            # Recover sender and add to tx_data
-            sender = Account.recover_transaction(canonical_tx)
-            tx_data['from'] = sender
-
-            return cls(timestamp_ms, raw_tx, tx_data, canonical_tx)
+            return cls(timestamp_ms, raw_tx, final_tx_obj)
 
         except (ValueError, TypeError, IndexError, DecodingError) as e:
             raise ValueError(f"Failed to parse raw tx: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error parsing raw tx: {e}")
-            raise ValueError(f"Unexpected error parsing raw tx: {e}")
 
-    def can_execute_with_block_base_fee(self, block_base_fee: int) -> bool:
-        """Checks if the transaction's fee cap is sufficient for the block's base fee."""
-        return self.max_fee_per_gas >= block_base_fee
-
-    def nonces(self) -> List[TxNonce]:
-        """Returns the nonce this transaction depends on."""
-        return [TxNonce(address=self.sender, nonce=self.nonce, optional=False)]
-
-    def transactions(self) -> List[Dict[str, Any]]:
-        """Returns a list containing this transaction's summary."""
-        tx_hash = self.id().value
-        return [{
-            'hash': tx_hash,
-            'from': self.sender,
-            'to': self.to,
-            'nonce': self.nonce,
-            'raw_tx': f"0x{self.raw_tx.hex()}"
-        }]
-
-    def get_transaction_data(self) -> Dict[str, Any]:
-        """
-        Returns the pre-decoded transaction data dictionary for EVM simulation.
-        """
-        return self.tx_data
 
 def _can_execute_list_txs(
     list_txs: List[Tuple['Order', bool]],
