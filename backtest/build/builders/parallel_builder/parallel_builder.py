@@ -106,7 +106,7 @@ class ParallelBuilder:
 
             stats = results_aggregator.get_stats()
             logger.info(
-                "Parallel builder done in %.2f ms | results processed=%d | final profit=%.6f ETH",
+                "Parallel builder done in %.2f ms | results processed=%d | final profit=%.18f ETH",
                 elapsed_ms,
                 stats["results_processed"],
                 stats["total_profit"] / 1e18

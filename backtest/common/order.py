@@ -6,6 +6,7 @@ import rlp
 from rlp.exceptions import DecodingError
 import pandas as pd
 import logging
+import time
 
 from web3 import Web3
 from ..fetch.root_provider import RootProvider
@@ -480,15 +481,36 @@ def filter_orders_by_nonces(
     lock = Lock()
 
     def fetch_and_cache_nonce(address: str):
-        try:
-            nonce = provider.w3.eth.get_transaction_count(address, parent_block)
-            with lock:
-                nonce_cache[address] = nonce
-        except Exception as e:
-            logger.warning(f"Could not fetch nonce for {address}@{parent_block}: {e}")
-            # If fetching fails, we can't validate, so we store -1 to indicate failure
-            with lock:
-                nonce_cache[address] = -1
+        max_retries = 3
+        base_delay = 1
+
+        for attempt in range(max_retries):
+            try:
+                nonce = provider.w3.eth.get_transaction_count(address, parent_block)
+                with lock:
+                    nonce_cache[address] = nonce
+                return
+            
+            except Exception as e:
+                error_str = str(e).lower()
+                if '429' in error_str or 'too many requests' in error_str:
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (attempt + 1)
+                        logger.warning(
+                            f"Rate limit hit for {address}. Retrying in {delay}s... (Attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(delay)
+                    else:
+                        logger.error(
+                            f"Could not fetch nonce for {address} after {max_retries} attempts due to rate limiting."
+                        )
+                else:
+                    logger.error(f"Could not fetch nonce for {address}@{parent_block}: {e}")
+                    break
+
+        # If all retries fail, mark as failed
+        with lock:
+            nonce_cache[address] = -1
 
     with ThreadPoolExecutor(max_workers=concurrency_limit) as executor:
         executor.map(fetch_and_cache_nonce, unique_addresses)

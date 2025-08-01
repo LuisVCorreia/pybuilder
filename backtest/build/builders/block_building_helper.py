@@ -180,10 +180,10 @@ class BlockBuildingHelper:
         payout_gas_cost = PAYOUT_GAS_LIMIT * self.context.block_base_fee
         
         logger.info(f"{self.builder_name} block finalized: "
-                   f"raw_profit={self.coinbase_profit / 10**18:.6f} ETH, "
-                   f"payout_gas_cost={payout_gas_cost / 10**18:.6f} ETH "
+                   f"raw_profit={self.coinbase_profit / 10**18:.18f} ETH, "
+                   f"payout_gas_cost={payout_gas_cost / 10**18:.18f} ETH "
                    f"(gas_limit={PAYOUT_GAS_LIMIT}), "
-                   f"true_block_value={final_bid_value / 10**18:.6f} ETH")
+                   f"true_block_value={final_bid_value / 10**18:.18f} ETH")
         
         trace = BlockTrace(
             bid_value=final_bid_value,

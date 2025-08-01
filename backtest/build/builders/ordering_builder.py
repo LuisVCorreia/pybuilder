@@ -109,7 +109,7 @@ class OrderingBuilder:
             result.build_time_ms = (time.time() - start_time) * 1000
             
             logger.info(
-                f"{self.name} built block: {result.bid_value / 10**18:.6f} ETH, "
+                f"{self.name} built block: {result.bid_value / 10**18:.18f} ETH, "
                 f"{result.total_gas_used:,} gas, {len(result.included_orders)} orders "
                 f"in {result.build_time_ms:.2f}ms"
             )

@@ -71,7 +71,7 @@ class ResultsAggregator:
         if updated:
             logger.debug(
                 f"New best result for group {group_id} with {len(group.orders)} orders: "
-                f"{result.total_profit / 1e18:.6f} ETH profit. "
+                f"{result.total_profit / 1e18:.18f} ETH profit. "
                 f"Total results processed: {self.results_processed}"
             )
         

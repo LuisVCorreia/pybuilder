@@ -5,6 +5,8 @@ from ..common.order import filter_orders_by_base_fee, fetch_transactions, filter
 from .mev_boost import fetch_winning_bid_trace
 from ..common.block_data import BlockData, OrdersWithTimestamp
 import logging
+import sys
+import json
 
 sec_to_ms = lambda s: int(s * 1000)
 window_before_sec = 180 # 3 mins
@@ -41,7 +43,7 @@ def fetch_historical_data(
         bid_trace = fetch_winning_bid_trace(block_number)
     except RuntimeError as e:
         logger.warning(f"Skipping block {block_number}: {e}")
-        return  # Nothing more to do for this block
+        sys.exit(1)
 
     block_ts = onchain_block['timestamp']  # In seconds
     block_ts_ms = block_ts * 1_000
@@ -55,22 +57,34 @@ def fetch_historical_data(
     logger.info("Fetching block from eth provider")
 
     parquet_files = ensure_parquet_files(mempool_data_dir, from_dt, to_dt)
-    mempool_txs = fetch_transactions(parquet_files, from_ts_ms, to_ts_ms)
-    logger.info("Fetched orders, unfiltered. Orders left: %d", len(mempool_txs))
+    mempool_txs_unfiltered = fetch_transactions(parquet_files, from_ts_ms, to_ts_ms)
+    logger.info("Fetched orders, unfiltered. Orders left: %d", len(mempool_txs_unfiltered))
 
-    mempool_txs = filter_orders_by_base_fee(onchain_block["baseFeePerGas"], mempool_txs)
-    logger.info("Filtered orders by base fee. Orders left: %d", len(mempool_txs))
+    mempool_txs_filtered_base_fee = filter_orders_by_base_fee(onchain_block["baseFeePerGas"], mempool_txs_unfiltered)
+    logger.info("Filtered orders by base fee. Orders left: %d", len(mempool_txs_filtered_base_fee))
 
-    mempool_txs = filter_orders_by_nonces(provider, mempool_txs, block_number, concurrency_limit)
-    logger.info("Filtered orders by nonces. Orders left: %d", len(mempool_txs))
+    mempool_txs_filtered_nonces = filter_orders_by_nonces(provider, mempool_txs_filtered_base_fee, block_number, concurrency_limit)
+    logger.info("Filtered orders by nonces. Orders left: %d", len(mempool_txs_filtered_nonces))
 
-    mempool_txs.sort(key=lambda o: o.timestamp_ms)
-    
+    mempool_txs_filtered_nonces.sort(key=lambda o: o.timestamp_ms)
+
     # Convert orders to OrdersWithTimestamp format
     orders_with_timestamp = [
         OrdersWithTimestamp(timestamp_ms=order.timestamp_ms, order=order)
-        for order in mempool_txs
+        for order in mempool_txs_filtered_nonces
     ]
+
+    results = {
+        "block_number": block_number,
+        "initial_mempool_size": len(mempool_txs_unfiltered),
+        "orders_after_base_fee_filter": len(mempool_txs_filtered_base_fee),
+        "final_available_orders": len(orders_with_timestamp),
+    }
+
+    # Save results to a JSON file
+    output_filename = f"fetch_outputs/results_{block_number}.json"
+    with open(output_filename, "w") as f:
+        json.dump(results, f, indent=4)
     
     return BlockData(
         block_number=block_number,
