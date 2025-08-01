@@ -4,7 +4,7 @@ import copy
 import time
 from typing import List, Dict, Optional, Callable
 
-from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue, MAX_BLOB_GAS_PER_BLOCK
+from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue
 from backtest.build.simulation.evm_simulator import EVMSimulator
 from .block_result import BlockResult, BlockTrace
 from backtest.common.order import OrderId

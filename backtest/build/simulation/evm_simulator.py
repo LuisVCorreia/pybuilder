@@ -11,11 +11,12 @@ from boa.rpc import EthereumRPC, to_hex
 from boa.environment import Env
 from eth.abc import SignedTransactionAPI
 from eth.vm.forks.prague.constants import MAX_BLOB_GAS_PER_BLOCK as PRAGUE_MAX_BLOB_GAS
-from eth.vm.forks.cancun.constants import MAX_BLOB_GAS_PER_BLOCK as CANCUN_MAX_BLOB_GAS
+from eth.vm.forks.cancun.constants import MAX_BLOB_GAS_PER_BLOCK as CANCUN_MAX_BLOB_GAS, GAS_PER_BLOB
+from eth_utils.exceptions import ValidationError
 
 from backtest.common.order import Order, OrderType, TxOrder, BundleOrder, ShareBundleOrder
 from .sim_tree import SimTree, SimulatedResult, NonceKey
-from .sim_utils import SimulationContext, SimulatedOrder, SimValue, OrderSimResult, SimulationError, DATA_GAS_PER_BLOB
+from .sim_utils import SimulationContext, SimulatedOrder, SimValue, OrderSimResult, SimulationError
 from .pyevm_opcode_state_tracer import PyEVMOpcodeStateTracer
 from .state_trace import UsedStateTrace
 
@@ -80,7 +81,7 @@ class EVMSimulator:
         elif "prague" in vm_class_name:
             return PRAGUE_MAX_BLOB_GAS
         else:
-            raise ValueError(f"Cannot determine max blob gas per block for VM class {vm_class_name}")
+            return 0
 
     def _execute_tx(self, tx: SignedTransactionAPI, accumulated_trace=None) -> OrderSimResult:
         try:
@@ -92,15 +93,15 @@ class EVMSimulator:
             # Start state tracing (patches EVM opcodes)
             self.state_tracer.start_tracing(tx)
 
-            # Validate header & tx manually
             self.vm.validate_transaction_against_header(header, tx)
+            self._validate_upfront_cost(tx)
 
             # Execute the transaction in the EVM
             computation = self.vm.state.apply_transaction(tx)  # low‑level exec
             receipt     = self.vm.make_receipt(header, tx, computation, self.vm.state)
             self.vm.validate_receipt(receipt)
 
-            # Finish state tracing and get the trace (pass tx for simple transfer handling)
+            # Finish state tracing and get the trace
             tx_state_trace = self.state_tracer.finish_tracing(computation, tx)
             
             if accumulated_trace is not None:
@@ -118,7 +119,7 @@ class EVMSimulator:
             if computation.is_error and receipt.gas_used == 0:
                 # Note: If tx reverted but used gas, we don't treat it as an error
                 self.state_tracer.cleanup()
-                logger.error(f"Transaction 0x{tx.hash.hex()} simulation failed during validation: {str(e)}")
+                logger.error(f"Transaction 0x{tx.hash.hex()} simulation failed during validation.")
                 return OrderSimResult(
                     success=False,
                     gas_used=0,
@@ -126,10 +127,8 @@ class EVMSimulator:
                     blob_gas_used=0,
                     paid_kickbacks=0,
                     error=SimulationError.VALIDATION_ERROR,
-                    error_message=str(e),
-                    state_trace=accumulated_trace  # Return accumulated trace even on failure
+                    state_trace=accumulated_trace
                 )
-
 
             return OrderSimResult(
                 success=True,
@@ -157,7 +156,7 @@ class EVMSimulator:
                 paid_kickbacks=0,
                 error=SimulationError.VALIDATION_ERROR,
                 error_message=str(e),
-                state_trace=accumulated_trace  # Return accumulated trace even on failure
+                state_trace=accumulated_trace
             )
 
     def _create_block_header(self):
@@ -214,7 +213,20 @@ class EVMSimulator:
         # prev_hashes and chain_id are handled by the patched titanoboa, so we do not set them here
 
     def _calculate_blob_gas_used(self, tx: SignedTransactionAPI) -> int:
-        return len(tx.blob_versioned_hashes) * DATA_GAS_PER_BLOB if tx.type_id == 3 else 0
+        return len(tx.blob_versioned_hashes) * GAS_PER_BLOB if tx.type_id == 3 else 0
+    
+    def _validate_upfront_cost(self, tx: SignedTransactionAPI):
+        """ 
+        Validate that the sender has enough balance to cover the transaction's upfront cost.
+        REVM does this automatically, but py-evm does not.
+        """
+        fee_per_gas = tx.max_fee_per_gas if hasattr(tx, "max_fee_per_gas") else tx.gas_price
+        upfront = tx.value + fee_per_gas * tx.gas
+        balance = self.vm.state.get_balance(tx.sender)
+        if balance < upfront:
+            raise ValidationError(
+                f"LackOfFundForMaxFee {{ fee: {upfront}, balance: {balance} }}"
+            )
 
     def _convert_result_to_simulated_order(self, order: Order, result: OrderSimResult) -> SimulatedOrder:
         if result.success:
@@ -415,7 +427,7 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
 #     # then tx with hash tx:0x0de7a57fb278beca6c802e2e007c29df311127080e2e37a189a4a8702cf567c6
 
 #     # get the first order
-#     first_order = next((o for o in orders if o.id().value == "0x2ab3665b4b88be6d4d299d2384e26b36c50179a68eb0ba9483c0680e4d197e5f"), None)
+#     first_order = next((o for o in orders if o.id().value == "0x44db17cdb6ec0e0ffb8eb5717f78b683d8ce199973b01bb1861e8695b829fa99"), None)
 #     second_order = next((o for o in orders if o.id().value == "0xb6528aba210ee94a27c8e682a9488ca7b6c2918ccd928a0b1034f7c2874f6a3b"), None)
 #     # third_order = next((o for o in orders if o.id().value == "0x1912bb377d6a2e13c76b3a48ef6c5b793eda305943cdde0f685abe3a851d6b88"), None)
 #     # if not first_order or not second_order or not third_order:

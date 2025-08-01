@@ -6,7 +6,6 @@ from .state_trace import UsedStateTrace
 from decimal import Decimal
 
 DATA_GAS_PER_BLOB = 131_072  # Gas cost per blob in wei, as per EIP-4844
-MAX_BLOB_GAS_PER_BLOCK = 786_432  # = 6 blobs * 131072
 
 @dataclass
 class SimulationContext:
