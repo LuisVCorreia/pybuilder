@@ -4,7 +4,10 @@ from pathlib import Path
 from typing import List, Optional, Type
 import threading
 import logging
+import time
+import requests
 
+from boa.rpc import EthereumRPC, RPCError
 from boa.rpc import RPC, to_int, to_hex
 from boa.vm.fork import AccountDBFork, CachingRPC, _PREDEFINED_BLOCKS
 from boa.vm.py_evm import PyEVM, VMPatcher, titanoboa_computation, Sha3PreimageTracer, SstoreTracer, GENESIS_PARAMS
@@ -39,6 +42,7 @@ def apply_patches():
         _patch_pyevm_fork_rpc()
         _patch_init_vm()
         _patch_make_chain()
+        _patch_ethereum_rpc_with_retries()
         _ALREADY_PATCHED = True
         logger.debug("boa_ext patches applied.")
 
@@ -274,3 +278,46 @@ def _load_or_build_prev_hashes(evm: PyEVM, caching_rpc: CachingRPC, fork_block_n
         db[key] = pickle.dumps(hashes)
 
     return hashes
+
+def _patch_ethereum_rpc_with_retries():
+    """
+    Patches the EthereumRPC class to add a retry mechanism for rate limiting.
+    """
+    original_fetch = EthereumRPC.fetch
+    original_fetch_multi = EthereumRPC.fetch_multi
+
+    def _request_with_retry(self, request_func, *args, **kwargs):
+        max_retries = 3
+        base_delay = 0.5
+
+        for attempt in range(max_retries):
+            try:
+                # Call the original request function (either fetch or fetch_multi)
+                return request_func(self, *args, **kwargs)
+
+            except (requests.exceptions.RequestException, RPCError) as e:
+                error_str = str(e).lower()
+                if '429' in error_str or 'too many requests' in error_str:
+                    # If it's a rate limit error, wait and retry
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)  # Exponential backoff
+                        logger.warning(
+                            f"RPC rate limit hit. Retrying in {delay:.2f}s... (Attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(delay)
+                    else:
+                        logger.error(f"RPC request failed after {max_retries} attempts due to rate limiting.")
+                        raise e  # Re-raise the final exception
+                else:
+                    # It's a different error, so re-raise immediately
+                    raise e
+
+    def fetch_with_retry(self, method, params):
+        return _request_with_retry(self, original_fetch, method, params)
+
+    def fetch_multi_with_retry(self, payloads):
+        return _request_with_retry(self, original_fetch_multi, payloads)
+
+    # Apply the patches
+    EthereumRPC.fetch = fetch_with_retry
+    EthereumRPC.fetch_multi = fetch_multi_with_retry

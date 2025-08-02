@@ -7,6 +7,7 @@ from ..common.block_data import BlockData, OrdersWithTimestamp
 import logging
 import sys
 import json
+import os
 
 sec_to_ms = lambda s: int(s * 1000)
 window_before_sec = 180 # 3 mins
@@ -82,6 +83,7 @@ def fetch_historical_data(
     }
 
     # Save results to a JSON file
+    os.makedirs("fetch_outputs", exist_ok=True)
     output_filename = f"fetch_outputs/results_{block_number}.json"
     with open(output_filename, "w") as f:
         json.dump(results, f, indent=4)
