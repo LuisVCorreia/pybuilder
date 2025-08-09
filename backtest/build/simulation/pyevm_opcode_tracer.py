@@ -21,7 +21,7 @@ def _addr_to_hex(addr) -> str:
 def _storage_addr_hex(computation) -> str:
     """
     py-evm uses:
-      - msg.storage_address for storage context (set even in CREATE*)
+      - msg.storage_address for storage context
       - msg.to is None during init code
     Always prefer storage_address, then fall back to to.
     """
@@ -132,7 +132,10 @@ class SelfBalanceTracer:
 
 
 class SelfdestructTracer:
-    """Traces SELFDESTRUCT operations"""
+    """
+    Traces SELFDESTRUCT operations, capturing the destroyed contract,
+    the beneficiary, and the value transferred.
+    """
     mnemonic = "SELFDESTRUCT"
 
     def __init__(self, selfdestruct_op, collector: StateTraceCollector):
@@ -140,52 +143,63 @@ class SelfdestructTracer:
         self.selfdestruct = selfdestruct_op
 
     def __call__(self, computation):
-        destroyed_addr = _addr_to_hex(computation.msg.storage_address)
+        # Get the beneficiary address from the top of the stack
+        beneficiary_bytes = to_bytes(computation._stack.values[-1])[-20:]
+        beneficiary_addr = _addr_to_hex(beneficiary_bytes)
 
-        self.selfdestruct(computation)
+        # Get the address of the contract being destroyed
+        destroyed_addr = _addr_to_hex(computation.msg.storage_address)
+        
+        # Get the contract's balance right before destruction. This is the amount
+        # that will be transferred. The computation object provides access to the state.
+        value_transferred = computation.state.get_balance(computation.msg.storage_address)
+
+        # Record the value transfer in the trace if value is greater than 0
+        if value_transferred > 0:
+            if destroyed_addr:
+                self.collector.trace.sent_amount[destroyed_addr] = \
+                    self.collector.trace.sent_amount.get(destroyed_addr, 0) + value_transferred
+            if beneficiary_addr:
+                self.collector.trace.received_amount[beneficiary_addr] = \
+                    self.collector.trace.received_amount.get(beneficiary_addr, 0) + value_transferred
 
         if destroyed_addr and destroyed_addr not in self.collector.trace.destructed_contracts:
             self.collector.trace.destructed_contracts.append(destroyed_addr)
 
+        self.selfdestruct(computation)
 
-class Create2Tracer:
-    """Traces CREATE2 operations to capture contract creation"""
-    mnemonic = "CREATE2"
+class CallTracer:
+    """
+    Traces CALL operations, capturing the value transferred.
+    """
+    mnemonic = "CALL"
 
-    def __init__(self, create2_op, collector: StateTraceCollector):
+    def __init__(self, call_op, collector: StateTraceCollector):
         self.collector = collector
-        self.create2 = create2_op
+        self.call = call_op
 
     def __call__(self, computation):
-        self.create2(computation)
+        # Arguments for CALL on the stack (from top down):
+        # gas, to, value, args_offset, args_size, ret_offset, ret_size
+        stack_values = computation._stack.values
+        value = to_int(stack_values[-3])
 
-        # Result (new address) is on stack top if success
-        if not computation.is_error and computation._stack.values:
-            created_addr_int = to_int(computation._stack.values[-1])
-            if created_addr_int != 0:
-                created_addr = _addr_to_hex(to_bytes(created_addr_int)[-20:])
-                if created_addr and created_addr not in self.collector.trace.created_contracts:
-                    self.collector.trace.created_contracts.append(created_addr)
+        if value > 0:
+            # The sender is the current contract's address
+            sender_addr = _storage_addr_hex(computation)
+            
+            # The recipient is the 'to' address from the stack
+            to_bytes_val = to_bytes(stack_values[-2])
+            # The address is the last 20 bytes of the 32-byte word
+            recipient_addr = _addr_to_hex(to_bytes_val[-20:])
 
+            if sender_addr and recipient_addr:
+                self.collector.trace.sent_amount[sender_addr] = \
+                    self.collector.trace.sent_amount.get(sender_addr, 0) + value
+                self.collector.trace.received_amount[recipient_addr] = \
+                    self.collector.trace.received_amount.get(recipient_addr, 0) + value
 
-class CreateTracer:
-    """Traces CREATE operations to capture contract creation"""
-    mnemonic = "CREATE"
-
-    def __init__(self, create_op, collector: StateTraceCollector):
-        self.collector = collector
-        self.create = create_op
-
-    def __call__(self, computation):
-        self.create(computation)
-
-        if not computation.is_error and computation._stack.values:
-            created_addr_int = to_int(computation._stack.values[-1])
-            if created_addr_int != 0:
-                created_addr = _addr_to_hex(to_bytes(created_addr_int)[-20:])
-                if created_addr and created_addr not in self.collector.trace.created_contracts:
-                    self.collector.trace.created_contracts.append(created_addr)
-
+        self.call(computation)
 
 
 def patch_evm_opcodes_for_tracing(computation_class, collector: StateTraceCollector):
@@ -197,8 +211,7 @@ def patch_evm_opcodes_for_tracing(computation_class, collector: StateTraceCollec
     BALANCE     = 0x31
     SELFBALANCE = 0x47
     SELFDESTRUCT= 0xFF
-    CREATE      = 0xF0
-    CREATE2     = 0xF5
+    CALL        = 0xF1
 
     opcodes = computation_class.opcodes.copy()
 
@@ -212,20 +225,18 @@ def patch_evm_opcodes_for_tracing(computation_class, collector: StateTraceCollec
         opcodes[SELFBALANCE] = SelfBalanceTracer(opcodes[SELFBALANCE], collector)
     if SELFDESTRUCT in opcodes:
         opcodes[SELFDESTRUCT] = SelfdestructTracer(opcodes[SELFDESTRUCT], collector)
-    if CREATE in opcodes:
-        opcodes[CREATE] = CreateTracer(opcodes[CREATE], collector)
-    if CREATE2 in opcodes:
-        opcodes[CREATE2] = Create2Tracer(opcodes[CREATE2], collector)
+    if CALL in opcodes:
+        opcodes[CALL] = CallTracer(opcodes[CALL], collector)
 
     computation_class.opcodes = opcodes
 
-    patched = [SLOAD, SSTORE, BALANCE, SELFBALANCE, SELFDESTRUCT, CREATE, CREATE2]
+    patched = [SLOAD, SSTORE, BALANCE, SELFBALANCE, SELFDESTRUCT, CALL]
     logger.debug(f"Patched {len([op for op in patched if op in opcodes])} opcodes for state tracing")
 
 
 def record_transaction_nonce(collector: StateTraceCollector, tx_sender: str, current_nonce: int):
     """
-    Record transaction nonce as storage read/write like rbuilder does.
+    Record transaction nonce as storage read/write.
     Treat nonce changes as slot 0 operations for the sender.
     """
     addr_str = tx_sender.lower()
