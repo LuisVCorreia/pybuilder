@@ -1,11 +1,9 @@
 from dataclasses import dataclass
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 from enum import Enum
 from backtest.common.order import Order
 from .state_trace import UsedStateTrace
 from decimal import Decimal
-
-DATA_GAS_PER_BLOB = 131_072  # Gas cost per blob in wei, as per EIP-4844
 
 @dataclass
 class SimulationContext:
@@ -88,7 +86,7 @@ class SimulationError(Enum):
 
 @dataclass
 class OrderSimResult:
-    """Internal result of simulating an order - minimal structure for pybuilder"""
+    """Internal result of simulating an order"""
     success: bool
     gas_used: int
     coinbase_profit: int = 0  # in wei
@@ -135,3 +133,12 @@ class SimulatedOrder:
                 state_trace=self.used_state_trace
             )
 
+    def serialize(self) -> dict:
+        """Converts a SimulatedOrder object to a JSON-serializable dictionary."""
+        return {
+            "order_id": str(self.order.id()),
+            "gas_used": self.sim_value.gas_used,
+            "coinbase_profit": self.sim_value.coinbase_profit,
+            "blob_gas_used": self.sim_value.blob_gas_used,
+            "state_trace": self.used_state_trace.serialize()
+        }

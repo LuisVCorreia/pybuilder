@@ -1,4 +1,4 @@
-from typing import Dict, List, Set, Any
+from typing import Dict, List
 from dataclasses import dataclass, field
 import copy
 
@@ -18,11 +18,10 @@ class SlotKey:
 @dataclass
 class UsedStateTrace:
     """
-    Python equivalent of rbuilder's UsedStateTrace.
     Tracks all state changes during transaction execution.
     
     Limitations (same as rbuilder):
-    * written_slot_values, received_amount and sent_amount are not correct if transaction reverts
+    written_slot_values, received_amount and sent_amount are not correct if transaction reverts
     """
     # Storage tracking
     read_slot_values: Dict[SlotKey, int] = field(default_factory=dict)
@@ -58,27 +57,27 @@ class UsedStateTrace:
         - Amounts are accumulated.
         - Contract lists are extended without duplicates.
         """
-        # --- Storage Reads (First read wins) ---
+        # Storage Reads (First read wins)
         for slot_key, value in other.read_slot_values.items():
             if slot_key not in self.read_slot_values:
                 self.read_slot_values[slot_key] = value
 
-        # --- Storage Writes (Last write wins) ---
+        # Storage Writes (Last write wins)
         self.written_slot_values.update(other.written_slot_values)
 
-        # --- Balance Reads (First read wins) ---
+        # Balance Reads (First read wins)
         for address, balance in other.read_balances.items():
             if address not in self.read_balances:
                 self.read_balances[address] = balance
 
-        # --- Amount Accumulation ---
+        # Amount Accumulation
         for address, amount in other.received_amount.items():
             self.received_amount[address] = self.received_amount.get(address, 0) + amount
         
         for address, amount in other.sent_amount.items():
             self.sent_amount[address] = self.sent_amount.get(address, 0) + amount
 
-        # --- Contract Lists (Extend without duplicates) ---
+        # Contract Lists (Extend without duplicates)
         for address in other.created_contracts:
             if address not in self.created_contracts:
                 self.created_contracts.append(address)
@@ -86,25 +85,6 @@ class UsedStateTrace:
         for address in other.destructed_contracts:
             if address not in self.destructed_contracts:
                 self.destructed_contracts.append(address)
-
-    def conflicts_with(self, other: 'UsedStateTrace') -> bool:
-        """Check if this trace conflicts with another (for MEV conflict detection)"""
-        # Check for overlapping storage writes
-        if set(self.written_slot_values.keys()) & set(other.written_slot_values.keys()):
-            return True
-            
-        # Check for overlapping balance changes
-        balance_changed = set(self.received_amount.keys()) | set(self.sent_amount.keys())
-        other_balance_changed = set(other.received_amount.keys()) | set(other.sent_amount.keys())
-        if balance_changed & other_balance_changed:
-            return True
-            
-        # Check for overlapping contract creation/destruction
-        if (set(self.created_contracts) & set(other.created_contracts) or
-            set(self.destructed_contracts) & set(other.destructed_contracts)):
-            return True
-            
-        return False
 
     def summary(self) -> str:
         """
@@ -149,3 +129,15 @@ class UsedStateTrace:
 
         output_lines.append("--- End of Trace Dump ---\n")
         return "\n".join(output_lines)
+
+    def serialize(self) -> dict:
+        """Converts a UsedStateTrace object to a JSON-serializable dictionary."""
+        return {
+            "read_slot_values": {f"{k.address}:{k.key}": v for k, v in self.read_slot_values.items()},
+            "written_slot_values": {f"{k.address}:{k.key}": v for k, v in self.written_slot_values.items()},
+            "read_balances": self.read_balances,
+            "received_amount": self.received_amount,
+            "sent_amount": self.sent_amount,
+            "created_contracts": self.created_contracts,
+            "destructed_contracts": self.destructed_contracts,
+        }

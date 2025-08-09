@@ -56,6 +56,42 @@ class BlockResult:
             return self.block_trace.bid_value / self.block_trace.gas_used
         return 0.0
 
+    def serialize(self) -> dict:
+        """Converts a single BlockResult into a JSON-serializable dictionary with specific fields."""
+        if not self.success or not self.block_trace or self.included_orders is None:
+            return {
+                "success": False,
+                "error_message": self.error_message or "Block building failed."
+            }
+
+        block_summary = {
+            "gas_used": self.block_trace.gas_used,
+            "blob_gas_used": self.block_trace.blob_gas_used,
+            "num_orders": self.block_trace.num_orders,
+            "raw_coinbase_profit": self.block_trace.raw_coinbase_profit,
+        }
+
+        # Serialize the ordered list of transactions
+        ordered_transactions = [
+            {
+                "order_id": str(sim_order.order.id()),
+                "gas_used": sim_order.sim_value.gas_used,
+                "coinbase_profit": sim_order.sim_value.coinbase_profit
+            }
+            for sim_order in self.included_orders
+        ]
+
+        return {
+            "block_summary": block_summary,
+            "ordered_transactions": ordered_transactions
+        }
+    
+def serialize_builder_results(results: List[BlockResult]) -> dict:
+    """Converts a list of BlockResult objects into a final dictionary for JSON export."""
+    final_output = {}
+    for result in results:
+        final_output[result.builder_name] = result.serialize()
+    return final_output
 
 class BuilderComparison:
     """
@@ -107,11 +143,10 @@ class BuilderComparison:
             for i, result in enumerate(successful_results, 1):
                 print(f"{i}. {result.builder_name}")
                 print(f"   True Bid Value: {result.bid_value / 10**18:.18f} ETH")
-                if hasattr(result.block_trace, 'raw_coinbase_profit') and result.block_trace.raw_coinbase_profit:
-                    print(f"   Raw Coinbase Profit: {result.block_trace.raw_coinbase_profit / 10**18:.18f} ETH")
-                    if hasattr(result.block_trace, 'payout_gas_cost') and result.block_trace.payout_gas_cost:
-                        print(f"   Payout Gas Cost: {result.block_trace.payout_gas_cost / 10**18:.18f} ETH")
+                print(f"   Raw Coinbase Profit: {result.block_trace.raw_coinbase_profit / 10**18:.18f} ETH")
+                print(f"   Payout Gas Cost: {result.block_trace.payout_gas_cost / 10**18:.18f} ETH")
                 print(f"   Gas Used: {result.total_gas_used:,}")
+                print(f"   Blob Gas Used: {result.block_trace.blob_gas_used:,}")
                 print(f"   Orders: {result.block_trace.num_orders if result.block_trace else 0}")
                 print(f"   Build Time: {result.build_time_ms:.2f}ms")
                 print(f"   Profit/Gas: {result.profit_per_gas:.2f} wei/gas")
@@ -145,7 +180,7 @@ class BuilderComparison:
             print("❌ No successful builders")
             return
         
-        print("\n" + "="*80)
+        print("\n" + "="*120)
         print(f"WINNING BUILDER: {best.builder_name.upper()}")
         print("="*80)
         
@@ -169,4 +204,4 @@ class BuilderComparison:
 
                 print(f"        {str(order_id)} gas: {gas_used:>8} profit: {profit_eth:.18f}")
 
-        print("="*80)
+        print("="*120)
