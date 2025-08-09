@@ -1,7 +1,8 @@
 import enum
 import uuid
 from dataclasses import dataclass
-from typing import Any, List, Union, Dict, Tuple
+from typing import Any, List, Union, Dict, Tuple, Set, Iterable
+import random
 import rlp
 from rlp.exceptions import DecodingError
 import pandas as pd
@@ -454,101 +455,143 @@ def filter_orders_by_base_fee(
     return [o for o in orders if o.can_execute_with_block_base_fee(block_base_fee)]
 
 def filter_orders_by_nonces(
-    provider: RootProvider,
-    orders: List[Order],
+    provider: "RootProvider",
+    orders: List["Order"],
     block_number: int,
     concurrency_limit: int,
-) -> List[Order]:
+    *,
+    max_attempts: int = 4,
+    base_delay: float = 0.5,
+    max_delay: float = 6.0,
+    use_jitter: bool = True,
+) -> List["Order"]:
     """
-    Filters out orders whose non-optional sub-txns have already been mined.
-    
-    This mirrors the Rust implementation: for each order, check its nonces against
-    the on-chain state at parent_block. If any non-optional nonce is too low 
-    (onchain_nonce > tx_nonce), drop the order. If all nonces failed, also drop.
-    
-    Returns the filtered list.
+    Filters out orders whose non-optional sub-txns have already been added to the chain.
+    Uses capped exponential backoff on nonce RPCs (incl. connection-closed/timeouts).
     """
     parent_block = block_number - 1
-    
-    # Collect all unique addresses to fetch nonces for
-    unique_addresses = set()
-    for order in orders:
-        for nonce in order.nonces():
-            unique_addresses.add(nonce.address)
 
-    # Fetch nonces concurrently
-    nonce_cache: Dict[str, int] = {}
-    lock = Lock()
+    # Collect unique addresses once
+    unique_addresses: Set[str] = {
+        nonce.address for order in orders for nonce in order.nonces()
+    }
 
-    def fetch_and_cache_nonce(address: str):
-        max_retries = 3
-        base_delay = 1
+    # Fetch all nonces (concurrently, with backoff)
+    nonce_cache = _fetch_nonces_with_backoff(
+        provider=provider,
+        addresses=unique_addresses,
+        parent_block=parent_block,
+        concurrency_limit=concurrency_limit,
+        max_attempts=max_attempts,
+        base_delay=base_delay,
+        max_delay=max_delay,
+        use_jitter=use_jitter,
+    )
 
-        for attempt in range(max_retries):
-            try:
-                nonce = provider.w3.eth.get_transaction_count(address, parent_block)
-                with lock:
-                    nonce_cache[address] = nonce
-                return
-            
-            except Exception as e:
-                error_str = str(e).lower()
-                if '429' in error_str or 'too many requests' in error_str:
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (attempt + 1)
-                        logger.warning(
-                            f"Rate limit hit for {address}. Retrying in {delay}s... (Attempt {attempt + 1}/{max_retries})"
-                        )
-                        time.sleep(delay)
-                    else:
-                        logger.error(
-                            f"Could not fetch nonce for {address} after {max_retries} attempts due to rate limiting."
-                        )
-                else:
-                    logger.error(f"Could not fetch nonce for {address}@{parent_block}: {e}")
-                    break
-
-        # If all retries fail, mark as failed
-        with lock:
-            nonce_cache[address] = -1
-
-    with ThreadPoolExecutor(max_workers=concurrency_limit) as executor:
-        executor.map(fetch_and_cache_nonce, unique_addresses)
-
-    # Filter orders using cache
+    # Filter orders based on cache
     kept: List[Order] = []
     for order in orders:
         order_nonces = order.nonces()
         all_nonces_failed = True
-        should_drop = False
+        drop = False
 
-        for nonce in order_nonces:
-            onchain_nonce = nonce_cache.get(nonce.address)
-
-            if onchain_nonce is None or onchain_nonce == -1:
-                should_drop = True
+        for n in order_nonces:
+            onchain = nonce_cache.get(n.address)
+            if onchain is None or onchain == -1:
+                drop = True
                 break
-
-            # Check if this nonce is too low
-            if onchain_nonce > nonce.nonce and not nonce.optional:
+            if onchain > n.nonce and not n.optional:
                 logger.debug(
-                    f"Order nonce too low, order: {order.id()}, nonce: {nonce.nonce}, onchain tx count: {onchain_nonce}"
+                    f"Order nonce too low, order: {order.id()}, "
+                    f"nonce: {n.nonce}, onchain tx count: {onchain}"
                 )
-                should_drop = True
+                drop = True
                 break
-            
-            if onchain_nonce <= nonce.nonce:
-                # This nonce is still valid, so not all nonces have failed
+            if onchain <= n.nonce:
                 all_nonces_failed = False
 
-        if should_drop:
-            continue
-
-        if all_nonces_failed:
-            logger.debug(f"All nonces failed, order: {order.id()}")
+        if drop or all_nonces_failed:
+            if all_nonces_failed and not drop:
+                logger.debug(f"All nonces failed, order: {order.id()}")
             continue
 
         logger.debug(f"Order nonce ok, order: {order.id()}")
         kept.append(order)
 
     return kept
+
+
+def _fetch_nonces_with_backoff(
+    provider: "RootProvider",
+    addresses: Iterable[str],
+    parent_block: int,
+    concurrency_limit: int,
+    *,
+    max_attempts: int,
+    base_delay: float,
+    max_delay: float,
+    use_jitter: bool,
+) -> Dict[str, int]:
+    """
+    Concurrently fetch nonces for a set of addresses with capped exponential backoff.
+    Returns a dict address -> nonce (or -1 on failure).
+    """
+    nonce_cache: Dict[str, int] = {}
+    lock = Lock()
+    addrs = list(addresses)
+    if not addrs:
+        return nonce_cache
+
+    def retryable(e: Exception) -> bool:
+        s = str(e).lower()
+        if any(t in s for t in (
+            "429", "too many requests", "rate limit",
+            "timeout", "timed out",
+            "connection reset", "connection aborted", "connection refused",
+            "connection closed", "broken pipe", "remote end closed",
+            "gateway timeout", "service unavailable", "502", "503", "504",
+        )):
+            return True
+        try:
+            payload = e.args[0]
+            if isinstance(payload, dict):
+                msg = str(payload.get("message", "")).lower()
+                code = str(payload.get("code", ""))
+                if any(t in msg for t in ("rate", "limit", "timeout", "temporar", "busy")):
+                    return True
+                if code in {"-32005"}:  # "limit exceeded"
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def sleep_for_attempt(i: int):
+        delay = min(base_delay * (2 ** i), max_delay)
+        if use_jitter:
+            delay += random.uniform(0.0, min(0.25 * (2 ** i), 0.75))
+        time.sleep(delay)
+
+    def fetch_one(address: str):
+        for i in range(max_attempts):
+            try:
+                n = provider.w3.eth.get_transaction_count(address, parent_block)
+                with lock:
+                    nonce_cache[address] = n
+                return
+            except Exception as e:
+                if i < max_attempts - 1 and retryable(e):
+                    logger.warning(
+                        f"Transient nonce error for {address}@{parent_block}: {e}. "
+                        f"Retry {i+1}/{max_attempts-1} with backoff."
+                    )
+                    sleep_for_attempt(i)
+                    continue
+                logger.error(f"Nonce fetch failed for {address}@{parent_block}: {e}")
+                break
+        with lock:
+            nonce_cache[address] = -1
+
+    with ThreadPoolExecutor(max_workers=max(1, concurrency_limit)) as ex:
+        list(ex.map(fetch_one, addrs))
+
+    return nonce_cache
