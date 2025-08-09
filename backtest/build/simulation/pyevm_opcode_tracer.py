@@ -45,7 +45,7 @@ class StateTraceCollector:
 
 
 class SloadTracer:
-    """Traces SLOAD operations to capture storage reads"""
+    """Traces SLOAD operations to capture storage reads even if SLOAD fails."""
     mnemonic = "SLOAD"
 
     def __init__(self, sload_op, collector: StateTraceCollector):
@@ -53,16 +53,43 @@ class SloadTracer:
         self.sload = sload_op
 
     def __call__(self, computation):
-        # slot is on top of stack before execution
+        # Slot is on top of stack before SLOAD executes
         slot = to_int(computation._stack.values[-1])
-
-        self.sload(computation)
-
-        value = to_int(computation._stack.values[-1])
         addr_hex = _storage_addr_hex(computation)
-        if addr_hex:
-            key = SlotKey(addr_hex, slot)
-            self.collector.trace.read_slot_values.setdefault(key, value)
+
+        # Prebuild key now, while we still know the storage context
+        key = SlotKey(addr_hex, slot) if addr_hex else None
+
+        try:
+            self.sload(computation)
+
+            # On success, record the result placed on stack
+            if key:
+                value_after = to_int(computation._stack.values[-1])
+                self.collector.trace.read_slot_values.setdefault(key, value_after)
+
+        except Exception as e:
+            # On failure, still record the intended read from state,
+            if key:
+                try:
+                    addr_obj = getattr(computation.msg, "storage_address", None) or computation.msg.to
+                    if hasattr(addr_obj, "canonical_address"):
+                        addr_canon = addr_obj.canonical_address
+                    else:
+                        addr_canon = to_bytes(addr_obj)[-20:]
+
+                    # Read directly from state (default 0 if no prior write)
+                    value_fallback = computation.state.get_storage(addr_canon, slot)
+                    value_fallback = int(value_fallback) if not isinstance(value_fallback, int) else value_fallback
+                except Exception:
+                    # If even state lookup fails, assume zero (EVM default for unset)
+                    value_fallback = 0
+
+                self.collector.trace.read_slot_values.setdefault(key, value_fallback)
+
+            # Preserve original failure semantics
+            raise
+
 
 
 class SstoreTracer:
