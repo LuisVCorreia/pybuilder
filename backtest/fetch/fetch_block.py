@@ -82,11 +82,11 @@ def fetch_historical_data(
         "final_available_orders": len(orders_with_timestamp),
     }
 
-    # Save results to a JSON file
-    os.makedirs("fetch_outputs", exist_ok=True)
-    output_filename = f"fetch_outputs/results_{block_number}.json"
-    with open(output_filename, "w") as f:
-        json.dump(results, f, indent=4)
+    # # Save results to a JSON file
+    # os.makedirs("pybuilder_results_1/fetch_outputs", exist_ok=True)
+    # output_filename = f"pybuilder_results_1/fetch_outputs/results_{block_number}.json"
+    # with open(output_filename, "w") as f:
+    #     json.dump(results, f, indent=4)
     
     return BlockData(
         block_number=block_number,

@@ -31,9 +31,6 @@ class SimulatedResult:
 class SimTree:
     def __init__(self, on_chain_nonces: Dict[str, int]):
         self.on_chain_nonces = on_chain_nonces.copy()
-
-        # Corrected state management dictionaries
-        # Keyed by the nonce a simulation *produces*.
         self.sims_by_resulting_nonce: Dict[NonceKey, SimulatedResult] = {}
         self.pending_orders: Dict[str, Tuple[Order, int]] = {}
         self.pending_nonces: Dict[NonceKey, List[str]] = {}

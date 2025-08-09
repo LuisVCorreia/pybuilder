@@ -3,8 +3,9 @@ import os
 from backtest.common.store import HistoricalDataStorage
 from backtest.build.simulation.evm_simulator import simulate_orders, EVMSimulator
 from backtest.build.builders.ordering_builder import run_builders
-from backtest.build.builders.block_result import BuilderComparison
+from backtest.build.builders.block_result import BuilderComparison, serialize_builder_results
 from backtest.build.simulation.sim_utils import SimulationContext
+import json
 logger = logging.getLogger(__name__)
 
 class LandedBlockFromDBOrdersSource:
@@ -61,21 +62,21 @@ def run_backtest(args, config):
     successful_sims = [sim for sim in simulated_orders if sim.simulation_result.success]
     failed_sims = [sim for sim in simulated_orders if not sim.simulation_result.success]
 
-    # Save successful simulation state traces to file
-    with open("state_trace_pybuilder.txt", "a") as f:
-        for sim in successful_sims:
-            f.write(f"Order {sim.order.id()} state trace:\n")
-            f.write(sim.simulation_result.state_trace.summary() + "\n")
+    # base_output_path = "pybuilder_results_3/build_outputs"
+    # if not os.path.exists(base_output_path):
+    #     os.makedirs(base_output_path)
+
+    # # Convert all successful simulations to serializable dictionaries
+    # results_to_dump = [sim.serialize() for sim in successful_sims]
+
+    # output_path = os.path.join(base_output_path, f"sims_{context.block_number}.json")
+    # logger.info(f"Dumping {len(results_to_dump)} successful simulations to {output_path}...")
+    
+    # with open(output_path, "w") as f:
+    #     json.dump(results_to_dump, f, indent=2)
 
     logger.info(f"Successful simulations: {len(successful_sims)}")
     logger.info(f"Failed simulations: {len(failed_sims)}")
-
-    with open("pybuilder_sim_results.txt", "w") as f:
-        for sim in simulated_orders:
-            f.write(f"Simulating order: {sim.order.id()}\n")
-            f.write(f"Simulation result: true, "
-                    f"gas used: {sim.sim_value.gas_used}, "
-                    f"coinbase profit: {sim.sim_value.coinbase_profit}\n")
 
     if successful_sims:
         total_profit = sum(sim.sim_value.coinbase_profit for sim in successful_sims)
@@ -83,12 +84,12 @@ def run_backtest(args, config):
         total_blob_gas = sum(sim.sim_value.blob_gas_used for sim in successful_sims)
         total_kickbacks = sum(sim.sim_value.paid_kickbacks for sim in successful_sims)
         
-        logger.info(f"Total simulated profit: {total_profit / 10**18:.6f} ETH")
+        logger.info(f"Total simulated profit: {total_profit / 10**18:.18f} ETH")
         logger.info(f"Total simulated gas used: {total_gas:,}")
         if total_blob_gas > 0:
             logger.info(f"Total blob gas used: {total_blob_gas:,}")
         if total_kickbacks > 0:
-            logger.info(f"Total kickbacks paid: {total_kickbacks / 10**18:.6f} ETH")
+            logger.info(f"Total kickbacks paid: {total_kickbacks / 10**18:.18f} ETH")
 
     # Run builders
     logger.info("Running builders...")
@@ -110,7 +111,13 @@ def run_backtest(args, config):
     
     # Run all builders
     results = run_builders(successful_sims, config, builder_names, evm_simulator)
-    
+
+    # comparison_output_path = os.path.join(base_output_path, f"built_blocks_{context.block_number}.json")
+    # logger.info(f"Dumping builder comparison results to {comparison_output_path}...")
+
+    # with open(comparison_output_path, "w") as f:
+    #     json.dump(serialize_builder_results(results), f, indent=2)
+
     # Display comparison
     BuilderComparison.print_comparison(results)
     
@@ -121,6 +128,6 @@ def run_backtest(args, config):
     best_result = BuilderComparison.select_best_builder(results)
     if best_result:
         logger.info(f"Block building complete. Best builder: {best_result.builder_name} "
-                   f"with {best_result.bid_value / 10**18:.6f} ETH")
+                   f"with {best_result.bid_value / 10**18:.18f} ETH")
     else:
         logger.info("Block building complete. No successful builders.")

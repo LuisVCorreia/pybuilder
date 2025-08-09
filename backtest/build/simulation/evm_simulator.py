@@ -3,7 +3,6 @@ import logging
 from typing import List
 from hexbytes import HexBytes
 import ast
-import inspect
 import boa_ext
 
 from boa.vm.py_evm import Address
@@ -11,7 +10,7 @@ from boa.rpc import EthereumRPC, to_hex
 from boa.environment import Env
 from eth.abc import SignedTransactionAPI, BlockHeaderAPI
 from eth.vm.forks.prague.constants import MAX_BLOB_GAS_PER_BLOCK as PRAGUE_MAX_BLOB_GAS
-from eth.vm.forks.cancun.constants import MAX_BLOB_GAS_PER_BLOCK as CANCUN_MAX_BLOB_GAS, GAS_PER_BLOB
+from eth.vm.forks.cancun.constants import MAX_BLOB_GAS_PER_BLOCK as CANCUN_MAX_BLOB_GAS
 from eth_utils.exceptions import ValidationError
 from eth.vm.forks.cancun.state import get_total_blob_gas
 
@@ -37,7 +36,8 @@ class EVMSimulator:
     def fork_at_block(self, block_number: int):
         # Forking the EVM will re-initiliase the correct VM based on the block timestamp
         block_id = to_hex(block_number)
-        self.env.fork_rpc(self.rpc, block_identifier=block_id, debug=False, cache_dir="./pybuilder_results_1/cache/")
+        # self.env.fork_rpc(self.rpc, block_identifier=block_id, debug=False, cache_dir="./pybuilder_results_3/cache/")
+        self.env.fork_rpc(self.rpc, block_identifier=block_id)
         self.vm = self.env.evm.vm
         self.header = self.vm.get_header()
         self._override_execution_context()  # Ensure execution context is set correctly
@@ -109,7 +109,7 @@ class EVMSimulator:
             self.vm._initial_header = self.header  # Update the VM's header reference
 
             # Finish state tracing and get the trace
-            tx_state_trace = self.state_tracer.finish_tracing(computation, tx)
+            tx_state_trace = self.state_tracer.finish_tracing(computation)
             
             if accumulated_trace is not None:
                 final_trace = accumulated_trace.copy()
@@ -383,7 +383,7 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
     """
     try:
 
-        # 1. Get initial on-chain nonces once
+        # Get initial on-chain nonces once
         on_chain_nonces = {addr: simulator.env.evm.vm.state.get_nonce(Address(addr).canonical_address) 
                            for order in orders for addr in {n.address for n in order.nonces()}}
 
@@ -393,7 +393,7 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
         
         sim_results_final: List[SimulatedOrder] = []
         
-        # 2. The main simulation loop
+        # The main simulation loop
         while True:
             sim_requests = sim_tree.pop_simulation_requests(limit=100)
             if not sim_requests:
@@ -413,7 +413,7 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
                     )
                     sim_tree.submit_simulation_result(result_to_submit)
         
-        # 3. Handle any orders that are still pending. They are unresolvable.
+        # Handle any orders that are still pending. They are unresolvable.
         for order_id, (order, _) in sim_tree.pending_orders.items():
             logger.debug(f"Order {order_id} has unresolvable nonce dependencies.")
             error_result = OrderSimResult(
@@ -432,37 +432,3 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
     except Exception as e:
         logger.error(f"Block simulation failed: {e}", exc_info=True)
         raise
-
-# def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[SimulatedOrder]:
-
-
-#     # Execute first tx with hash tx:0x95c572ec5a475c615cf24758c367e834df214119139e6e573c713156d99325ad
-#     # then tx with hash tx:0x0de7a57fb278beca6c802e2e007c29df311127080e2e37a189a4a8702cf567c6
-
-#     # get the first order
-#     first_order = next((o for o in orders if o.id().value == "0xd6438ddc8b6e9aefd0aed9b71032a11b99d9bcff6d8e4c0dad930b303365e432"), None)
-#     second_order = next((o for o in orders if o.id().value == "0xab4158e1bb9466d05287a855f1689edffb2a701021d0991f348d2e75b8f4d0d4"), None)
-#     # third_order = next((o for o in orders if o.id().value == "0x1912bb377d6a2e13c76b3a48ef6c5b793eda305943cdde0f685abe3a851d6b88"), None)
-#     # if not first_order or not second_order or not third_order:
-#     #     raise ValueError("Required orders not found in the provided list")
-    
-#     simulator._create_block_header()  # Create a block header for the simulation
-#     # Simulate first order
-#     print("Header gas used before first order:", simulator.header.gas_used)
-#     print("Header gas used before first order:", simulator.env.evm.vm.get_header().gas_used)
-#     first_simulated_order = simulator._simulate_tx_order(first_order)
-#     logger.info(f"First order simulation result: {first_simulated_order.simulation_result.success}, gas used: {first_simulated_order.simulation_result.gas_used}, coinbase profit: {first_simulated_order.simulation_result.coinbase_profit}")
-#     print("Header gas used after first order:", simulator.header.gas_used)
-#     print("Header gas used after first order:", simulator.env.evm.vm.get_header().gas_used)
-#     # Simulate second order
-#     second_simulated_order = simulator._simulate_tx_order(second_order)
-#     logger.info(f"Second order simulation result: {second_simulated_order.simulation_result.success}, gas used: {second_simulated_order.simulation_result.gas_used}, coinbase profit: {second_simulated_order.simulation_result.coinbase_profit}")
-#     print("Header gas used after second order:", simulator.header.gas_used)
-#     print("Header gas used after second order:", simulator.env.evm.vm.get_header().gas_used)
-#     # # Simulate third order
-#     # third_simulated_order = simulator.simulate_tx_order(third_order)
-#     # logger.info(f"Third order simulation result: {third_simulated_order.simulation_result.success}, gas used: {third_simulated_order.simulation_result.gas_used}, coinbase profit: {third_simulated_order.simulation_result.coinbase_profit}")
-
-
-#     import sys
-#     sys.exit(0)
