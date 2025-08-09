@@ -7,11 +7,9 @@ from .pyevm_opcode_tracer import StateTraceCollector, patch_evm_opcodes_for_trac
 
 logger = logging.getLogger(__name__)
 
-
 class PyEVMOpcodeStateTracer:
     """
-    State tracer that uses opcode-level patching to capture all state changes.
-    This is much more accurate than manual before/after comparisons.
+    State tracer that uses opcode-level patching to capture state changes.
     """
     
     def __init__(self, env: Env):
@@ -22,7 +20,7 @@ class PyEVMOpcodeStateTracer:
     
     def start_tracing(self, tx: SignedTransactionAPI) -> None:
         """
-        Start tracing by patching EVM opcodes to capture state changes.
+        Start tracing by patching EVM opcodes.
         """
         self.collector.reset()
         
@@ -34,36 +32,9 @@ class PyEVMOpcodeStateTracer:
         if not self._patched:
             patch_evm_opcodes_for_tracing(computation_class, self.collector)
             self._patched = True
-            logger.debug("EVM opcodes patched for state tracing")
-        
-        self._record_tx_nonce(tx)
+            logger.debug("EVM opcodes patched for tracing")
 
-    def _extract_sender(self, tx: SignedTransactionAPI):
-        """Extract sender from transaction using various methods"""
-        if hasattr(tx, 'sender'):
-            return tx.sender
-        elif hasattr(tx, 'signer'):
-            return tx.signer()
-        elif hasattr(tx, 'from_'):
-            return tx.from_
-        return None
-    
-    def finish_tracing(self, computation, tx: SignedTransactionAPI = None) -> UsedStateTrace:
-        """
-        Complete tracing and return the collected state trace.
-        """
-        trace = self.collector.get_trace()
-        try:
-            # Additional processing from computation
-            if computation:
-                self._process_computation_for_additional_info(computation, trace)
-            
-            logger.debug(f"Opcode-based state tracing complete: {trace.summary()}")
-            return trace
-            
-        except Exception as e:
-            logger.error(f"Error during opcode-based state tracing: {e}")
-            return trace
+        self._record_tx_nonce(tx)
     
     def cleanup(self) -> None:
         """
@@ -77,53 +48,63 @@ class PyEVMOpcodeStateTracer:
     
     def _record_tx_nonce(self, tx: SignedTransactionAPI) -> None:
         """
-        Record transaction nonce as storage read/write like rbuilder does.
+        Record transaction nonce as storage read/write.
         """
         try:
             sender = tx.sender
             if sender is None:
                 return
             
-            if isinstance(sender, str):
-                sender_str = sender.lower()
-            elif hasattr(sender, 'canonical_address'):
-                sender_str = '0x' + sender.canonical_address.hex().lower()
-            elif hasattr(sender, 'hex'):
-                sender_str = '0x' + sender.hex().lower()
-            elif isinstance(sender, bytes):
-                sender_str = '0x' + sender.hex().lower()
-            else:
-                sender_str = str(sender).lower()
-            
-            if not sender_str.startswith('0x'):
-                sender_str = '0x' + sender_str
-            
+            sender_str = '0x' + sender.hex().lower()
+
+            logger.debug(f"Recording nonce for sender {sender_str}")
+
             current_nonce = getattr(tx, 'nonce', 0)
             record_transaction_nonce(self.collector, sender_str, current_nonce)
             
         except Exception as e:
             logger.debug(f"Error recording transaction nonce: {e}")
     
-    def _process_computation_for_additional_info(self, computation, trace: UsedStateTrace) -> None:
+    def finish_tracing(self, computation) -> UsedStateTrace:
         """
-        Extract any additional information from the computation tree that
-        the opcode tracers might have missed.
+        Complete tracing and return the collected state trace.
+        """
+        trace = self.collector.get_trace()
+        try:
+            if computation:
+                self._extract_message_value_transfer(computation, trace)
+                self._process_computation_recursively(computation, trace)
+
+            return trace
+            
+        except Exception as e:
+            logger.error(f"Error during opcode-based state tracing: {e}")
+            return trace
+
+    def _process_computation_recursively(self, computation, trace: UsedStateTrace) -> None:
+        """
+        Recursively walk the computation tree to find contract creations.
+        Value transfers are now handled by live tracers.
         """
         try:
-            # Process value transfers from message info
-            self._extract_message_value_transfers(computation, trace)
-            
+
+            # Record created contracts if this computation is a contract creation
+            if hasattr(computation, 'msg') and computation.msg.is_create:
+                created_addr = self._addr_to_hex(computation.msg.storage_address)
+                if created_addr and created_addr not in trace.created_contracts:
+                    trace.created_contracts.append(created_addr)
+
             # Recursively process child computations
             if hasattr(computation, 'children'):
                 for child in computation.children:
-                    self._process_computation_for_additional_info(child, trace)
-                    
+                    self._process_computation_recursively(child, trace)
+    
         except Exception as e:
             logger.debug(f"Error processing computation for additional info: {e}")
-    
-    def _extract_message_value_transfers(self, computation, trace: UsedStateTrace) -> None:
+
+    def _extract_message_value_transfer(self, computation, trace: UsedStateTrace) -> None:
         """
-        Extract value transfers from computation messages.
+        Extract top-level message value transfer from the computation.
         """
         try:
             if hasattr(computation, 'msg') and hasattr(computation.msg, 'value'):
@@ -135,16 +116,15 @@ class PyEVMOpcodeStateTracer:
                     sender = getattr(computation.msg, 'sender', None)
                     to = getattr(computation.msg, 'to', None)
                     
-                    if sender:
+                    if sender and to:
                         sender_str = self._addr_to_hex(sender)
                         trace.sent_amount[sender_str] = trace.sent_amount.get(sender_str, 0) + value
-                        
-                    if to:
+
                         to_str = self._addr_to_hex(to)
                         trace.received_amount[to_str] = trace.received_amount.get(to_str, 0) + value
 
         except Exception as e:
-            logger.debug(f"Error extracting message value transfers: {e}")
+            logger.debug(f"Error extracting message value transfer: {e}")
     
     def _addr_to_hex(self, addr) -> str:
         """Convert address to standardized hex string"""
@@ -160,7 +140,3 @@ class PyEVMOpcodeStateTracer:
             if not addr_str.startswith('0x'):
                 addr_str = '0x' + addr_str
             return addr_str
-
-def create_pyevm_opcode_state_tracer(env: Env) -> PyEVMOpcodeStateTracer:
-    """Factory function to create a PyEVM opcode-based state tracer"""
-    return PyEVMOpcodeStateTracer(env)
