@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Assume standard payout tx gas limit
 # rbuilder uses more complex logic to estimate this, but for simple backtesting we can use a fixed value
-PAYOUT_GAS_LIMIT = 21000  
+PAYOUT_GAS_LIMIT = 21000
 
 class ExecutionError(Exception):
     """Exception raised when order execution fails."""
@@ -55,21 +55,16 @@ class BlockBuildingHelper:
         """Check if order can be added without exceeding gas limits."""
         return (self.gas_used + order.sim_value.gas_used <= self.context.block_gas_limit)
     
-    def get_proposer_payout_tx_value(self, fee_recipient: str = None) -> Optional[int]:
-        """
-        Gets the block profit excluding the expected payout gas that we'll pay.
-        
-        Args:
-            fee_recipient: The fee recipient address (defaults to context coinbase)
-            
-        Returns:
-            The true block value after subtracting payout gas cost, or None if profit too low
-        """
+    def get_payout_gas_cost(self) -> int:
+        """Calculate the expected payout gas cost for the block."""
+        return PAYOUT_GAS_LIMIT * self.context.block_base_fee
+    
+    def get_true_block_value(self, fee_recipient: str = None) -> Optional[int]:
         if fee_recipient is None:
             fee_recipient = self.context.coinbase
-        
-        payout_gas_cost = PAYOUT_GAS_LIMIT * self.context.block_base_fee
-        
+
+        payout_gas_cost = self.get_payout_gas_cost()
+
         if self.coinbase_profit >= payout_gas_cost:
             return self.coinbase_profit - payout_gas_cost
         else:
@@ -89,6 +84,9 @@ class BlockBuildingHelper:
             Dictionary with execution results
         """
         try:
+            # Keep track of the previous header state in case of reversion
+            prev_header = self.simulator.header.copy()
+
             # Always use in-block simulation - re-execute the order in current EVM state
             logger.debug(f"Re-executing order {order.order.id()} in block context")
             in_block_result, checkpoint = self.simulator.simulate_order(order.order)
@@ -120,19 +118,12 @@ class BlockBuildingHelper:
                 filter_result(order.order.id(), order.sim_value, new_sim_value)
 
             order.sim_value = new_sim_value
-            
-            # Check gas limits
-            if self.gas_used + simulated_gas > self.context.block_gas_limit:
-                raise ExecutionError(
-                    f"Gas limit exceeded: {self.gas_used + simulated_gas} > {self.context.block_gas_limit}",
-                    "gas_limit_exceeded"
-                )
 
-            if self.blob_gas_used + simulated_blob_gas > self.simulator.get_max_blob_gas_per_block():
+            # Check gas limits (need to leave enough for payout tx)
+            if self.gas_used + simulated_gas + PAYOUT_GAS_LIMIT > self.context.block_gas_limit:
                 raise ExecutionError(
-                    (f"Blob gas limit exceeded: {self.blob_gas_used + simulated_blob_gas} > "
-                     f"{self.simulator.get_max_blob_gas_per_block()}"),
-                    "blob_gas_limit_exceeded"
+                    f"Gas limit exceeded: {self.gas_used + simulated_gas + PAYOUT_GAS_LIMIT} > {self.context.block_gas_limit}",
+                    "gas_limit_exceeded"
                 )
                     
             # Update block state
@@ -159,6 +150,8 @@ class BlockBuildingHelper:
             
         except ExecutionError:
             self.simulator.vm.state.revert(checkpoint)
+            self.simulator.header = prev_header  # Revert to previous header state
+            self.simulator.vm._initial_header = prev_header  # Update VM header reference
             logger.debug(f"Order {order.order.id()} execution failed, rolling back state")
             raise
         except Exception as e:
@@ -173,7 +166,7 @@ class BlockBuildingHelper:
         fill_time_ms = (time.time() - self.fill_start_time) * 1000
         
         # Calculate true block value by subtracting expected payout gas cost
-        true_block_value = self.get_proposer_payout_tx_value()
+        true_block_value = self.get_true_block_value()
         
         final_bid_value = true_block_value if true_block_value is not None else 0
         
