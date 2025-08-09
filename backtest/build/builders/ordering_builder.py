@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import List, Dict, Set, Optional
 from collections import defaultdict
+import copy
 
 from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue
 from backtest.build.simulation.evm_simulator import EVMSimulator
@@ -172,7 +173,7 @@ class OrderingBuilder:
             
             # Skip orders with negative profit in profit-based sorting
             if (self.config.sorting in [Sorting.MAX_PROFIT] and 
-                order.sim_value.coinbase_profit <= 0):
+                order.sim_value.coinbase_profit < 0):
                 logger.debug(f"Skipping order {order.order.id()} with non-positive profit")
                 continue
             
@@ -249,7 +250,7 @@ class OrderingBuilder:
             try:
                 new_sim_value, nonces_updates = helper.commit_order(sim_order, profit_validator)
                 
-                # Order succeeded - update nonces in order store
+                # Order succeeded, update nonces in order store
                 nonces_updated = []
                 for account, nonce in nonces_updates:
                     nonces_updated.append(TxNonce(address=account, nonce=nonce, optional=False))
@@ -303,7 +304,6 @@ class OrderingBuilder:
                 sim_order.sim_value = error.new_sim
 
             # Re-insert order with updated simulation value for retry
-            # In a real implementation, this would use the actual execution result
             logger.debug(f"Retrying order {order_id} (attempt {attempt_count + 1}/{self.config.failed_order_retries})")
             order_attempts[order_id] += 1
             order_store.insert_order(sim_order)
@@ -369,15 +369,17 @@ def run_builders(
         
         builder_config = builder_configs[builder_name]
         builder_algo = builder_config.get('algo')
+
+        simulated_orders_copy = [copy.deepcopy(order) for order in simulated_orders]
         
         if builder_algo == 'ordering-builder':
             builder = create_ordering_builder(builder_config)
-            result = builder.build_block(simulated_orders, evm_simulator)
+            result = builder.build_block(simulated_orders_copy, evm_simulator)
             results.append(result)
             
         elif builder_algo == 'parallel-builder':
             from .parallel_builder import run_parallel_builder
-            result = run_parallel_builder(simulated_orders, config, evm_simulator)
+            result = run_parallel_builder(simulated_orders_copy, config, evm_simulator)
             results.append(result)
             
         else:
