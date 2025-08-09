@@ -1,7 +1,7 @@
 from __future__ import annotations
 import pickle
 from pathlib import Path
-from typing import List, Optional, Type
+from typing import List, Optional
 import threading
 import logging
 import time
@@ -9,8 +9,8 @@ import requests
 
 from boa.rpc import EthereumRPC, RPCError
 from boa.rpc import RPC, to_int, to_hex
-from boa.vm.fork import AccountDBFork, CachingRPC, _PREDEFINED_BLOCKS
-from boa.vm.py_evm import PyEVM, VMPatcher, titanoboa_computation, Sha3PreimageTracer, SstoreTracer, GENESIS_PARAMS
+from boa.vm.fork import AccountDBFork, CachingRPC, _PREDEFINED_BLOCKS, DEFAULT_CACHE_DIR
+from boa.vm.py_evm import PyEVM, VMPatcher, GENESIS_PARAMS
 from boa.util.sqlitedb import SqliteCache
 from eth.db.account import AccountDB
 from boa.vm.fast_accountdb import patch_pyevm_state_object
@@ -69,8 +69,7 @@ def _patch_sqlite_cache():
     SqliteCache._boa_ext_original_create = orig_create
 
 def _patch_caching_rpc_new():
-    orig_new = CachingRPC.__new__
-    def new(cls, rpc, chain_id, debug):
+    def new(cls, rpc, chain_id, debug, cache_dir=DEFAULT_CACHE_DIR):
         import threading
         thread_id = threading.get_ident()
         # replicate original but add thread id
@@ -81,7 +80,7 @@ def _patch_caching_rpc_new():
             return cls._loaded[(rpc.identifier, chain_id, thread_id)]
 
         ret = super(CachingRPC, cls).__new__(cls)
-        ret.__init__(rpc, chain_id, debug)
+        ret.__init__(rpc, chain_id, debug, cache_dir)
         cls._loaded[(rpc.identifier, chain_id, thread_id)] = ret
         return ret
     CachingRPC.__new__ = new
@@ -113,9 +112,6 @@ def _patch_account_db_fork():
     AccountDBFork.class_from_rpc = classmethod(patched_class_from_rpc)
 
     def patched_init(self, rpc: CachingRPC, chain_id: int, block_identifier, *a, **k):
-        # Call only AccountDB.__init__ (super chain). We cannot easily
-        # import AccountDB symbolically here, but super() works because
-        # MRO: AccountDBFork -> AccountDB -> ...
         super(AccountDBFork, self).__init__(*a, **k)
 
         from eth.db.backends.memory import MemoryDB
@@ -158,21 +154,10 @@ def _patch_init_vm():
         self.vm = self.chain.get_vm(target_header)
         self.vm.__class__._state_class.account_db_class = account_db_class
 
-        # patcher & computation class wiring (unchanged)
         self.patch = VMPatcher(self.vm)
-
-        c: Type[titanoboa_computation] = type(
-            "TitanoboaComputation",
-            (titanoboa_computation, self.vm.state.computation_class),
-            {"env": self.env},
-        )
 
         if self._fast_mode_enabled:
             patch_pyevm_state_object(self.vm.state)
-
-        self.vm.state.computation_class = c
-        c.opcodes[0x20] = Sha3PreimageTracer(c.opcodes[0x20], self.env)
-        c.opcodes[0x55] = SstoreTracer(c.opcodes[0x55], self.env)
 
     PyEVM._init_vm = patched_init_vm
 
@@ -190,7 +175,7 @@ def _patch_pyevm_fork_rpc():
         block_info = self.vm.state._account_db._block_info
         chain_id = self.vm.state._account_db._chain_id
 
-        # 4) patch execution-context values
+        # Patch execution-context values
         self.patch.timestamp    = int(block_info["timestamp"], 16)
         self.patch.block_number = int(block_info["number"], 16)
         self.patch.chain_id     = chain_id
@@ -269,11 +254,11 @@ def _load_or_build_prev_hashes(evm: PyEVM, caching_rpc: CachingRPC, fork_block_n
             block_info = caching_rpc.fetch("eth_getBlockByNumber", [hex(bn), False])
             h = bytes.fromhex(block_info["hash"].removeprefix("0x"))
         except Exception:
-            # If a fetch fails, append zero hash (match your earlier fallback)
+            # If a fetch fails, append zero hash
             h = b"\x00" * 32
         hashes.append(h)
 
-    # Cache the *variable-length* list (length = min(PREV_HASH_WINDOW, fork_block_number))
+    # Cache the variable-length list (length = min(PREV_HASH_WINDOW, fork_block_number))
     if db is not None:
         db[key] = pickle.dumps(hashes)
 
