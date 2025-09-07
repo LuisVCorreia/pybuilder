@@ -4,6 +4,7 @@ from typing import List
 from hexbytes import HexBytes
 import ast
 import boa_ext
+import time
 
 from boa.vm.py_evm import Address
 from boa.rpc import EthereumRPC, to_hex
@@ -382,6 +383,7 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
         List of simulated orders
     """
     try:
+        simulator.fork_at_block(simulator.context.block_number - 1)
 
         # Get initial on-chain nonces once
         on_chain_nonces = {addr: simulator.env.evm.vm.state.get_nonce(Address(addr).canonical_address) 
@@ -400,7 +402,10 @@ def simulate_orders(orders: List[Order], simulator: EVMSimulator) -> List[Simula
                 break # No more ready orders to process
 
             for request in sim_requests:
+                sim_start_time = time.time()
                 simulated_order = simulator.simulate_order_with_parents(request.order, request.parents)
+                sim_end_time = time.time()
+                simulated_order.sim_duration = sim_end_time - sim_start_time
                 sim_results_final.append(simulated_order) # Add result regardless of success
 
                 if simulated_order.simulation_result.success:

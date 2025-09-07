@@ -115,6 +115,7 @@ class SimulatedOrder:
     sim_value: SimValue
     used_state_trace: Optional[UsedStateTrace] = None  # State tracing information
     _error_result: Optional[OrderSimResult] = None  # For failed orders
+    sim_duration: float = 0.0  # Duration of the simulation
 
     @property
     def simulation_result(self) -> OrderSimResult:
