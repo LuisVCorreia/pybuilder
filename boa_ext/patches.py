@@ -36,6 +36,7 @@ def apply_patches():
         if _ALREADY_PATCHED:
             return
         _patch_sqlite_cache()
+        _patch_sqlite_cache_no_expiry()
         _patch_caching_rpc_new()
         _patch_fetch_uncached()
         _patch_account_db_fork()
@@ -67,6 +68,56 @@ def _patch_sqlite_cache():
 
     SqliteCache.create = classmethod(create_per_path_thread)
     SqliteCache._boa_ext_original_create = orig_create
+
+
+def _patch_sqlite_cache_no_expiry():
+    FAR_FUTURE = 32503680000.0  # 3000-01-01 UTC as Unix epoch
+
+    # Make GC a no-op
+    def _no_gc(self):
+        # still flush any pending expiry updates just to clear buffers
+        self._expiry_updates = []
+        self._last_flush = time.time()
+    SqliteCache.gc = _no_gc
+
+    # Never schedule expiry updates on reads
+    def _getitem_no_touch(self, key: bytes) -> bytes:
+        res = self._cursor.execute(
+            "SELECT value, expires_at FROM kv_store WHERE key=?",
+            (key,)
+        ).fetchone()
+        if res is None:
+            raise KeyError(key)
+        val, _ = res
+        # we don't append to self._expiry_updates
+        return val
+    SqliteCache.__getitem__ = _getitem_no_touch
+
+    # Force writes to use far-future expiry, and never flush expiry updates
+    def _get_expiry_ts_far(self) -> float:
+        return FAR_FUTURE
+    SqliteCache.get_expiry_ts = _get_expiry_ts_far
+
+    def _setitem_far(self, key: bytes, value: bytes) -> None:
+        with self.acquire_write_lock():
+            self._cursor.execute(
+                """
+                INSERT INTO kv_store(key, value, expires_at) VALUES (?,?,?)
+                  ON CONFLICT DO UPDATE
+                  SET value=excluded.value,
+                      expires_at=excluded.expires_at
+                """,
+                (key, value, FAR_FUTURE),
+            )
+            self._last_flush = time.time()
+    SqliteCache.__setitem__ = _setitem_far
+
+    # Make the batch expiry updater a no-op
+    def _flush_noop(self, nolock=False):
+        self._expiry_updates = []
+        self._last_flush = time.time()
+    SqliteCache._flush = _flush_noop
+
 
 def _patch_caching_rpc_new():
     def new(cls, rpc, chain_id, debug, cache_dir=DEFAULT_CACHE_DIR):
