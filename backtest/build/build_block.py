@@ -3,9 +3,8 @@ import os
 from backtest.common.store import HistoricalDataStorage
 from backtest.build.simulation.evm_simulator import simulate_orders, EVMSimulator
 from backtest.build.builders.ordering_builder import run_builders
-from backtest.build.builders.block_result import BuilderComparison, serialize_builder_results
+from backtest.build.builders.block_result import BuilderComparison
 from backtest.build.simulation.sim_utils import SimulationContext
-import json
 logger = logging.getLogger(__name__)
 
 class LandedBlockFromDBOrdersSource:
@@ -58,22 +57,8 @@ def run_backtest(args, config):
     simulated_orders = simulate_orders(order_objects, evm_simulator)
     logger.info(f"Simulation complete. Got {len(simulated_orders)} simulated orders.")
 
-    # Print simulation results
     successful_sims = [sim for sim in simulated_orders if sim.simulation_result.success]
     failed_sims = [sim for sim in simulated_orders if not sim.simulation_result.success]
-
-    # base_output_path = "pybuilder_results_3/build_outputs"
-    # if not os.path.exists(base_output_path):
-    #     os.makedirs(base_output_path)
-
-    # # Convert all successful simulations to serializable dictionaries
-    # results_to_dump = [sim.serialize() for sim in successful_sims]
-
-    # output_path = os.path.join(base_output_path, f"sims_{context.block_number}.json")
-    # logger.info(f"Dumping {len(results_to_dump)} successful simulations to {output_path}...")
-    
-    # with open(output_path, "w") as f:
-    #     json.dump(results_to_dump, f, indent=2)
 
     logger.info(f"Successful simulations: {len(successful_sims)}")
     logger.info(f"Failed simulations: {len(failed_sims)}")
@@ -111,12 +96,6 @@ def run_backtest(args, config):
     
     # Run all builders
     results = run_builders(successful_sims, config, builder_names, evm_simulator)
-
-    # comparison_output_path = os.path.join(base_output_path, f"built_blocks_{context.block_number}.json")
-    # logger.info(f"Dumping builder comparison results to {comparison_output_path}...")
-
-    # with open(comparison_output_path, "w") as f:
-    #     json.dump(serialize_builder_results(results), f, indent=2)
 
     # Display comparison
     BuilderComparison.print_comparison(results)
