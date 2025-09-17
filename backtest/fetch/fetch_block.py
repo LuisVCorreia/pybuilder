@@ -6,8 +6,7 @@ from .mev_boost import fetch_winning_bid_trace
 from ..common.block_data import BlockData, OrdersWithTimestamp
 import logging
 import sys
-import json
-import os
+
 
 sec_to_ms = lambda s: int(s * 1000)
 window_before_sec = 180 # 3 mins
@@ -75,19 +74,6 @@ def fetch_historical_data(
         for order in mempool_txs_filtered_nonces
     ]
 
-    results = {
-        "block_number": block_number,
-        "initial_mempool_size": len(mempool_txs_unfiltered),
-        "orders_after_base_fee_filter": len(mempool_txs_filtered_base_fee),
-        "final_available_orders": len(orders_with_timestamp),
-    }
-
-    # # Save results to a JSON file
-    # os.makedirs("pybuilder_results_1/fetch_outputs", exist_ok=True)
-    # output_filename = f"pybuilder_results_1/fetch_outputs/results_{block_number}.json"
-    # with open(output_filename, "w") as f:
-    #     json.dump(results, f, indent=4)
-    
     return BlockData(
         block_number=block_number,
         winning_bid_trace=bid_trace,
