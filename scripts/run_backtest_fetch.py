@@ -39,7 +39,7 @@ def main():
         block_number=block_number,
         provider_url=provider_url,
         mempool_data_dir=mempool_data_dir,
-        concurrency_limit=config.get("fetch_concurrency_limit")
+        batch_size=config["batch_size"]
     )
 
     if block_data:

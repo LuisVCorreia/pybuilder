@@ -18,7 +18,7 @@ def fetch_historical_data(
     block_number: int,
     provider_url: str,
     mempool_data_dir: str,
-    concurrency_limit: int
+    batch_size: int
 ):
     """
     Fetch a block and its mempool txs, and store in SQLite DB.
@@ -26,6 +26,7 @@ def fetch_historical_data(
         block_number: Block number to fetch
         provider_url: Ethereum node RPC URL
         mempool_data_dir: Directory for mempool Parquet files
+        batch_size: Number of batched requests to use when fetching nonces
     """
 
     logger.info("Fetching historical data for block %s", block_number)
@@ -63,7 +64,7 @@ def fetch_historical_data(
     mempool_txs_filtered_base_fee = filter_orders_by_base_fee(onchain_block["baseFeePerGas"], mempool_txs_unfiltered)
     logger.info("Filtered orders by base fee. Orders left: %d", len(mempool_txs_filtered_base_fee))
 
-    mempool_txs_filtered_nonces = filter_orders_by_nonces(provider, mempool_txs_filtered_base_fee, block_number, concurrency_limit)
+    mempool_txs_filtered_nonces = filter_orders_by_nonces(provider, mempool_txs_filtered_base_fee, block_number, batch_size)
     logger.info("Filtered orders by nonces. Orders left: %d", len(mempool_txs_filtered_nonces))
 
     mempool_txs_filtered_nonces.sort(key=lambda o: o.timestamp_ms)

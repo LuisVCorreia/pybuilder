@@ -1,8 +1,7 @@
 import enum
 import uuid
 from dataclasses import dataclass
-from typing import Any, List, Union, Dict, Tuple, Set, Iterable
-import random
+from typing import Any, List, Union, Dict, Tuple, Set
 import rlp
 from rlp.exceptions import DecodingError
 import pandas as pd
@@ -10,9 +9,9 @@ import logging
 import time
 
 from web3 import Web3
+import requests
+from alive_progress import alive_bar
 from ..fetch.root_provider import RootProvider
-from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
 import json
 
 from eth.abc import SignedTransactionAPI
@@ -454,42 +453,37 @@ def filter_orders_by_base_fee(
 ) -> List[Order]:
     return [o for o in orders if o.can_execute_with_block_base_fee(block_base_fee)]
 
+
 def filter_orders_by_nonces(
     provider: "RootProvider",
     orders: List["Order"],
     block_number: int,
-    concurrency_limit: int,
-    *,
-    max_attempts: int = 4,
-    base_delay: float = 0.5,
-    max_delay: float = 6.0,
-    use_jitter: bool = True,
+    batch_size: int = 25,
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 10.0,
 ) -> List["Order"]:
     """
-    Filters out orders whose non-optional sub-txns have already been added to the chain.
-    Uses capped exponential backoff on nonce RPCs (incl. connection-closed/timeouts).
+    Filters orders using Batch API requests.
+    Detects both HTTP 429s and inner JSON-RPC 429s.
     """
     parent_block = block_number - 1
-
-    # Collect unique addresses once
+    
     unique_addresses: Set[str] = {
         nonce.address for order in orders for nonce in order.nonces()
     }
 
-    # Fetch all nonces (concurrently, with backoff)
-    nonce_cache = _fetch_nonces_with_backoff(
+    nonce_cache = _fetch_nonces_batched(
         provider=provider,
-        addresses=unique_addresses,
+        addresses=list(unique_addresses),
         parent_block=parent_block,
-        concurrency_limit=concurrency_limit,
+        batch_size=batch_size,
         max_attempts=max_attempts,
         base_delay=base_delay,
         max_delay=max_delay,
-        use_jitter=use_jitter,
     )
 
-    # Filter orders based on cache
-    kept: List[Order] = []
+    kept: List["Order"] = []
     for order in orders:
         order_nonces = order.nonces()
         all_nonces_failed = True
@@ -511,87 +505,140 @@ def filter_orders_by_nonces(
                 all_nonces_failed = False
 
         if drop or all_nonces_failed:
-            if all_nonces_failed and not drop:
-                logger.debug(f"All nonces failed, order: {order.id()}")
             continue
-
-        logger.debug(f"Order nonce ok, order: {order.id()}")
         kept.append(order)
 
     return kept
 
 
-def _fetch_nonces_with_backoff(
+def _fetch_nonces_batched(
     provider: "RootProvider",
-    addresses: Iterable[str],
+    addresses: List[str],
     parent_block: int,
-    concurrency_limit: int,
-    *,
+    batch_size: int,
     max_attempts: int,
     base_delay: float,
     max_delay: float,
-    use_jitter: bool,
 ) -> Dict[str, int]:
-    """
-    Concurrently fetch nonces for a set of addresses with capped exponential backoff.
-    Returns a dict address -> nonce (or -1 on failure).
-    """
     nonce_cache: Dict[str, int] = {}
-    lock = Lock()
-    addrs = list(addresses)
-    if not addrs:
+    
+    if not addresses:
+        return nonce_cache
+    
+    try:
+        rpc_url = provider.w3.provider.endpoint_uri
+    except AttributeError:
+        logger.error("Could not find endpoint_uri on provider.")
         return nonce_cache
 
-    def retryable(e: Exception) -> bool:
-        s = str(e).lower()
-        if any(t in s for t in (
-            "429", "too many requests", "rate limit",
-            "timeout", "timed out",
-            "connection reset", "connection aborted", "connection refused",
-            "connection closed", "broken pipe", "remote end closed",
-            "gateway timeout", "service unavailable", "502", "503", "504",
-        )):
-            return True
-        try:
-            payload = e.args[0]
-            if isinstance(payload, dict):
-                msg = str(payload.get("message", "")).lower()
-                code = str(payload.get("code", ""))
-                if any(t in msg for t in ("rate", "limit", "timeout", "temporar", "busy")):
-                    return True
-                if code in {"-32005"}:  # "limit exceeded"
-                    return True
-        except Exception:
-            pass
-        return False
+    block_hex = hex(parent_block)
+    total_addresses = len(addresses)
 
-    def sleep_for_attempt(i: int):
-        delay = min(base_delay * (2 ** i), max_delay)
-        if use_jitter:
-            delay += random.uniform(0.0, min(0.25 * (2 ** i), 0.75))
-        time.sleep(delay)
+    def _clean_error_msg(err_input) -> str:
+        s = str(err_input).lower()
+        if "429" in s or "rate limit" in s or "throughput" in s:
+            return "Rate limit exceeded"
+        if "timeout" in s:
+            return "Request timed out"
+        if "connection" in s:
+            return "Connection error"
+        return str(err_input).replace('\n', ' ')[:80] + "..." if len(str(err_input)) > 80 else str(err_input)
 
-    def fetch_one(address: str):
-        for i in range(max_attempts):
-            try:
-                n = provider.w3.eth.get_transaction_count(address, parent_block)
-                with lock:
-                    nonce_cache[address] = n
-                return
-            except Exception as e:
-                if i < max_attempts - 1 and retryable(e):
-                    logger.warning(
-                        f"Transient nonce error for {address}@{parent_block}: {e}. "
-                        f"Retry {i+1}/{max_attempts-1} with backoff."
+    with alive_bar(total_addresses, title="Filtering Nonces", bar="blocks", spinner="dots_waves") as bar:
+        
+        for i in range(0, len(addresses), batch_size):
+            chunk = addresses[i : i + batch_size]
+            id_to_addr = {idx: addr for idx, addr in enumerate(chunk)}
+            
+            payload = []
+            for idx, addr in enumerate(chunk):
+                payload.append({
+                    "jsonrpc": "2.0",
+                    "method": "eth_getTransactionCount",
+                    "params": [addr, block_hex],
+                    "id": idx
+                })
+
+            for attempt in range(max_attempts):
+                try:
+                    response = requests.post(
+                        rpc_url, 
+                        json=payload, 
+                        headers={"Content-Type": "application/json"},
+                        timeout=10
                     )
-                    sleep_for_attempt(i)
-                    continue
-                logger.error(f"Nonce fetch failed for {address}@{parent_block}: {e}")
-                break
-        with lock:
-            nonce_cache[address] = -1
+                    
+                    if response.status_code == 429:
+                        raise Exception(f"HTTP 429: {response.text}")
+                    
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    if not isinstance(data, list):
+                        if isinstance(data, dict) and "error" in data:
+                            raise Exception(f"RPC Error: {data['error']}")
+                        raise Exception(f"Unexpected response format")
 
-    with ThreadPoolExecutor(max_workers=max(1, concurrency_limit)) as ex:
-        list(ex.map(fetch_one, addrs))
+                    # Check for rate limits inside the JSON response
+                    has_rate_limit_error = False
+                    for item in data:
+                        if "error" in item:
+                            msg = str(item["error"].get("message", "")).lower()
+                            code = item["error"].get("code")
+                            if code == 429 or "rate limit" in msg or "throughput" in msg:
+                                has_rate_limit_error = True
+                                break
+                    
+                    if has_rate_limit_error:
+                        raise Exception("Rate limit exceeded in batch response")
+
+                    # Process Success
+                    for item in data:
+                        req_id = item.get("id")
+                        addr = id_to_addr.get(req_id)
+                        if addr is None: continue
+
+                        if "error" in item:
+                            err_msg = _clean_error_msg(item['error'])
+                            logger.error(f"Failed to fetch nonce for {addr}: {err_msg}")
+                            nonce_cache[addr] = -1
+                        else:
+                            res = item.get("result")
+                            try:
+                                val = int(res, 16) if isinstance(res, str) else int(res)
+                                nonce_cache[addr] = val
+                            except:
+                                nonce_cache[addr] = -1
+
+                    # Success, break retry loop
+                    break 
+
+                except Exception as e:
+                    # Check if we should retry
+                    err_str = str(e).lower()
+                    is_rate_limit = any(x in err_str for x in ("429", "throughput", "rate limit", "too many requests"))
+                    is_network = any(x in err_str for x in ("timeout", "connection", "502", "503", "504"))
+                    
+                    if attempt < max_attempts - 1 and (is_network or is_rate_limit):
+                        delay = min(base_delay * (2 ** attempt), max_delay) 
+
+                        reason = "Rate limit hit" if is_rate_limit else "Network issue"
+                        logger.warning(
+                            f"{reason}. Retrying in {delay:.1f}s (Attempt {attempt+1}/{max_attempts})..."
+                        )
+                        time.sleep(delay)
+                    else:
+                        # Final failure for this group of addresses
+                        clean_err = _clean_error_msg(e)
+                        logger.error(f"Failed to fetch nonces for {len(chunk)} addresses. {clean_err}")
+                        for addr in chunk:
+                            nonce_cache[addr] = -1
+                        break
+            
+            bar(len(chunk))  
+
+            # Pause between batches to avoid rate limits
+            # more info: https://www.alchemy.com/docs/reference/throughput
+            time.sleep(0.6) 
 
     return nonce_cache

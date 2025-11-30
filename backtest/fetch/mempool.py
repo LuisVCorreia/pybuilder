@@ -23,7 +23,7 @@ def download_parquet_for_day(data_dir: str, day_str: str) -> str:
 
     mode = "ab" if existing else "wb"
     with open(file_path, mode) as f, alive_bar(
-        total, title=f"Downloading {day_str}.parquet", bar="blocks", spinner="dots_waves2", length=40
+        total, title=f"Downloading {day_str}.parquet", bar="blocks", spinner="dots_waves"
     ) as bar:
         bar(existing)
         for chunk in resp.iter_content(chunk_size=32_768):
