@@ -4,15 +4,15 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import argparse
-from backtest.config import load_config
-from backtest.fetch.fetch_block import fetch_historical_data
-from backtest.common.store import HistoricalDataStorage
-from dotenv import load_dotenv
 import logging
-load_dotenv()
-
 
 def main():
+    from backtest.config import load_config
+    from backtest.fetch.fetch_block import fetch_historical_data
+    from backtest.common.store import HistoricalDataStorage
+    from dotenv import load_dotenv
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="Fetch a block and mempool txs, store in SQLite DB.")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     parser.add_argument("--block", type=int, help="Block number to fetch")
@@ -51,4 +51,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logging.shutdown()
+        sys.exit(0)

@@ -2,6 +2,7 @@ import time
 import logging
 from queue import PriorityQueue, Empty
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import signal
 
 from typing import List, Dict
 
@@ -26,6 +27,8 @@ def _worker_init(ctx, rpc_url, log_q):
     """
     Runs once in each child process. Build and keep a single EVMSimulator.
     """
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
     global _SIMULATOR, _LOG_Q
     _LOG_Q = log_q
     init_worker_logging(log_q)
@@ -139,26 +142,50 @@ class ParallelBuilder:
         rpc_url = evm_simulator.rpc_url
         log_q, listener = start_parent_listener()
 
+        executor = None
+        original_sigint_handler = signal.getsignal(signal.SIGINT)
+
         try:
-            with ProcessPoolExecutor(
+            # Ignore the sigint globally before spawning child processes
+            # This ensures any child process created inherits this "Ignore" state
+            # instantly so they won't crash during the spawn phase
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+            executor = ProcessPoolExecutor(
                 max_workers=self.config.num_workers,
                 initializer=_worker_init,
                 initargs=(ctx, rpc_url, log_q),
-            ) as executor:
-                future_to_task = {executor.submit(_worker_run, task): task for task in tasks}
+            )
+            
+            future_to_task = {executor.submit(_worker_run, task): task for task in tasks}
 
-                for idx, future in enumerate(as_completed(future_to_task), 1):
-                    task = future_to_task[future]
-                    try:
-                        result = future.result()
-                        results_aggregator.update_result(task.group_idx, result, task.group)
-                    except Exception as e:
-                        logger.warning(
-                            "Task failed for group %s: %s", task.group_idx, e, exc_info=True
-                        )
-                    if idx % 10 == 0 or idx == total:
-                        logger.debug("Completed %d/%d tasks", idx, total)
+            # Restore the original sigint handler in the parent process
+            signal.signal(signal.SIGINT, original_sigint_handler)
+
+            for idx, future in enumerate(as_completed(future_to_task), 1):
+                task = future_to_task[future]
+                try:
+                    result = future.result()
+                    results_aggregator.update_result(task.group_idx, result, task.group)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        "Task failed for group %s: %s", task.group_idx, e, exc_info=True
+                    )
+                
+                if idx % 10 == 0 or idx == total:
+                    logger.debug("Completed %d/%d tasks", idx, total)
+
+        except KeyboardInterrupt:
+            logger.debug("\n Parallel build interrupted by user. Shutting down workers...")
+            if executor:
+                executor.shutdown(wait=True, cancel_futures=True)
+            raise  # Reraise to stop the main program
+
         finally:
+            if executor:
+                executor.shutdown(wait=True) 
             listener.stop()
 
     def _log_group_stats(self, conflict_groups):

@@ -5,13 +5,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import argparse
 import logging
-from backtest.config import load_config
-from backtest.build.build_block import run_backtest
-from dotenv import load_dotenv
-
-load_dotenv()
 
 def main():
+
+    from backtest.config import load_config
+    from backtest.build.build_block import run_backtest
+    from dotenv import load_dotenv
+
+    load_dotenv()
     parser = argparse.ArgumentParser(description="Run a backtest to build a block from historical data.")
     
     # Arguments from BuildBlockCfg
@@ -38,4 +39,8 @@ def main():
     run_backtest(args, config)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logging.shutdown()
+        sys.exit(0)
