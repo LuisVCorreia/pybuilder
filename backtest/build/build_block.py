@@ -14,8 +14,16 @@ class LandedBlockFromDBOrdersSource:
 
     def read_block_data(self, args, config):
         storage = HistoricalDataStorage(config["fetch_sqlite_db_path"])
-        block_data = storage.read_block_data(args.block)
-        storage.close()
+        try:
+            block_data = storage.read_block_data(args.block)
+        except Exception as e:
+            logger.error(f"Error reading block data: {e}")
+            block_data = None
+        finally:
+            storage.close()
+
+        if not block_data:
+            return None
 
         if args.only_order_ids:
             block_data.filter_orders_by_ids(args.only_order_ids)
@@ -31,6 +39,7 @@ class LandedBlockFromDBOrdersSource:
 def run_backtest(args, config):
     logger.info("Starting backtest block build...")
     order_source = LandedBlockFromDBOrdersSource(args, config)
+    if not order_source.block_data: return
     
     orders = order_source.block_data.available_orders
     logger.info(f"Got {len(orders)} orders to process")
