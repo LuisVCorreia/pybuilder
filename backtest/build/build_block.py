@@ -118,7 +118,7 @@ def run_backtest(args, config):
     # Run all builders
     results = run_builders(successful_sims, config, args, builder_names, evm_simulator)
 
-    if not results or all(res is None for res in results):
+    if not results:
         return
 
     # Display comparison

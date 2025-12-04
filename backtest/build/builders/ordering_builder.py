@@ -391,5 +391,7 @@ def run_builders(
                 success=False,
                 error_message=f"Unknown builder algorithm: {builder_algo}"
             ))
-    
+
+    # Remove any None results (in case of skipped block building)
+    results = [res for res in results if res is not None]
     return results
