@@ -147,10 +147,9 @@ class BlockData:
         """Filter out orders with specific IDs"""
         order_ids_set = set(order_ids)
         filtered_orders = []
-        
         for order_with_ts in self.available_orders:
-            order_id = str(order_with_ts.order.id())
-            if order_id not in order_ids_set:
+            order_id = str(order_with_ts.order.id().value)
+            if order_id in order_ids_set:
                 filtered_orders.append(order_with_ts)
             else:
                 self.filtered_orders[order_with_ts.order.id()] = OrderFilteredReason.IDS

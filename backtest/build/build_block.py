@@ -35,6 +35,30 @@ class LandedBlockFromDBOrdersSource:
         print(f"builder pubkey: {block_data.winning_bid_trace.get('builder_pubkey')}")
 
         return block_data
+    
+def show_sim_results(successful_sims, failed_sims):
+    if successful_sims:
+        print("Successful simulations:")
+        for sim in successful_sims:
+            print(f"Order ID: {sim.order.id().value} | "
+                    f"Profit: {sim.sim_value.coinbase_profit / 10**18:.18f} ETH | "
+                    f"Gas Used: {sim.sim_value.gas_used:>7,} | "
+                    f"Blob Gas Used: {sim.sim_value.blob_gas_used:,}")
+
+        total_profit = sum(sim.sim_value.coinbase_profit for sim in successful_sims)
+        total_gas = sum(sim.sim_value.gas_used for sim in successful_sims)
+        total_blob_gas = sum(sim.sim_value.blob_gas_used for sim in successful_sims)
+
+    if failed_sims:
+        print("Failed simulations:")
+        for sim in failed_sims:
+            print(f"Order ID: {sim.order.id().value} | "
+                    f"Error: {sim.simulation_result.error_message}")
+
+    print(f"Total simulated profit: {total_profit / 10**18:.18f} ETH")
+    print(f"Total simulated gas used: {total_gas:,}")
+    print(f"Total blob gas used: {total_blob_gas:,}")
+
 
 def run_backtest(args, config):
     logger.info("Starting backtest block build...")
@@ -67,27 +91,15 @@ def run_backtest(args, config):
     logger.info(f"Simulation complete. Got {len(simulated_orders)} simulated orders.")
 
     successful_sims = [sim for sim in simulated_orders if sim.simulation_result.success]
-    failed_sims = [sim for sim in simulated_orders if not sim.simulation_result.success]
 
-    logger.info(f"Successful simulations: {len(successful_sims)}")
-    logger.info(f"Failed simulations: {len(failed_sims)}")
+    if args.show_sim:
+        failed_sims = [sim for sim in simulated_orders if not sim.simulation_result.success]
+        show_sim_results(successful_sims, failed_sims)
 
-    if successful_sims:
-        total_profit = sum(sim.sim_value.coinbase_profit for sim in successful_sims)
-        total_gas = sum(sim.sim_value.gas_used for sim in successful_sims)
-        total_blob_gas = sum(sim.sim_value.blob_gas_used for sim in successful_sims)
-        total_kickbacks = sum(sim.sim_value.paid_kickbacks for sim in successful_sims)
-        
-        logger.info(f"Total simulated profit: {total_profit / 10**18:.18f} ETH")
-        logger.info(f"Total simulated gas used: {total_gas:,}")
-        if total_blob_gas > 0:
-            logger.info(f"Total blob gas used: {total_blob_gas:,}")
-        if total_kickbacks > 0:
-            logger.info(f"Total kickbacks paid: {total_kickbacks / 10**18:.18f} ETH")
+    if args.no_block_building:
+        logger.info("Skipping block building.")
+        return
 
-    # Run builders
-    logger.info("Running builders...")
-    
     # Get builder names from args or config
     builder_names = getattr(args, 'builders', None)
     if not builder_names:
@@ -101,10 +113,13 @@ def run_backtest(args, config):
         logger.warning("No builders specified or found in config")
         return
     
-    logger.info(f"Running builders: {builder_names}")
+    logger.info(f"Running builders: {', '.join(builder_names)}")
     
     # Run all builders
-    results = run_builders(successful_sims, config, builder_names, evm_simulator)
+    results = run_builders(successful_sims, config, args, builder_names, evm_simulator)
+
+    if not results or all(res is None for res in results):
+        return
 
     # Display comparison
     BuilderComparison.print_comparison(results)

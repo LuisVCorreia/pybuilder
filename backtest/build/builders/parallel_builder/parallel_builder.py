@@ -3,6 +3,7 @@ import logging
 from queue import PriorityQueue, Empty
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import signal
+import argparse
 
 from typing import List, Dict
 
@@ -41,8 +42,9 @@ def _worker_run(task: ConflictTask):
 
 class ParallelBuilderConfig:
     """Configuration for the parallel builder."""
-    def __init__(self, num_workers: int = 4):
+    def __init__(self, num_workers: int = 4, no_conflict_resolution: bool = False):
         self.num_workers = num_workers
+        self.no_conflict_resolution = no_conflict_resolution
 
 
 class ParallelBuilder:
@@ -68,7 +70,7 @@ class ParallelBuilder:
         start_time = time.time()
         try:
             logger.info(
-                "Starting parallel block building with %d orders",
+                "Starting parallel builder with %d orders",
                 len(simulated_orders)
             )
 
@@ -77,7 +79,11 @@ class ParallelBuilder:
             conflict_finder = ConflictFinder()
             conflict_groups = conflict_finder.add_orders(simulated_orders)
             logger.debug("Found %d conflict groups", len(conflict_groups))
-            self._log_group_stats(conflict_groups)
+
+            if self.config.no_conflict_resolution:
+                self._log_group_stats(conflict_groups)
+                logger.info("No conflict resolution mode enabled.")
+                return None
 
             best_results = BestResults()
             results_aggregator = ResultsAggregator(best_results)
@@ -196,25 +202,26 @@ class ParallelBuilder:
         sizes = [len(g.orders) for g in conflict_groups]
         max_size = max(sizes, default=0)
         avg_size = sum(sizes) / len(sizes)
-        logger.debug(
+        logger.info(
             "Group stats: %d single-order, %d multi-order | max=%d avg=%.1f",
             single_order_groups,
             multi_order_groups,
             max_size,
             avg_size
         )
-        logger.debug("Group sizes: %s", sizes)
 
         # print each order in each group
         for group in conflict_groups:
-            logger.debug("Group %s: %d orders: %s",
-                        group.id, len(group.orders),
-                        ",    ".join(str(order.order.id()) for order in group.orders))
+            print(
+                f"Group {group.id}: {len(group.orders)} orders: "
+                f"{', '.join(str(order.order.id()) for order in group.orders)}"
+            )
 
 
 def run_parallel_builder(
     simulated_orders: List[SimulatedOrder],
     config: Dict,
+    args: argparse.Namespace,
     evm_simulator: EVMSimulator
 ) -> BlockResult:
     """
@@ -224,5 +231,8 @@ def run_parallel_builder(
     parallel_cfg = builder_configs.get('parallel', {})
     num_workers = parallel_cfg.get('num_workers', 1)
 
-    builder = ParallelBuilder(ParallelBuilderConfig(num_workers=num_workers))
+    builder = ParallelBuilder(ParallelBuilderConfig(
+        num_workers=num_workers,
+        no_conflict_resolution=args.no_conflict_resolution))
+
     return builder.build_block(simulated_orders, evm_simulator)

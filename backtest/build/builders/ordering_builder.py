@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Set, Optional
 from collections import defaultdict
 import copy
+import argparse
 
 from backtest.build.simulation.sim_utils import SimulatedOrder, SimValue
 from backtest.build.simulation.evm_simulator import EVMSimulator
@@ -93,8 +94,7 @@ class OrderingBuilder:
                 order_store.insert_order(order)
             
             logger.info(
-                f"Building block with {len(valid_orders)} orders "
-                f"({len(simulated_orders) - len(valid_orders)} filtered) using {self.name}"
+                f"Starting ordering builder with {len(valid_orders)} orders using {self.name}"
             )
             
             # Initialize block building helper with the shared simulator
@@ -336,7 +336,8 @@ def create_ordering_builder(builder_config: dict) -> OrderingBuilder:
 
 def run_builders(
     simulated_orders: List[SimulatedOrder], 
-    config: dict, 
+    config: dict,
+    args: argparse.Namespace,
     builder_names: List[str],
     evm_simulator: EVMSimulator
 ) -> List[BlockResult]:
@@ -346,6 +347,7 @@ def run_builders(
     Args:
         simulated_orders: Successfully simulated orders
         config: Full configuration dictionary
+        args: Command line arguments
         builder_names: Names of builders to run
         evm_simulator: Pre-created EVM simulator instance for reuse
         
@@ -379,7 +381,7 @@ def run_builders(
             
         elif builder_algo == 'parallel-builder':
             from .parallel_builder import run_parallel_builder
-            result = run_parallel_builder(simulated_orders_copy, config, evm_simulator)
+            result = run_parallel_builder(simulated_orders_copy, config, args, evm_simulator)
             results.append(result)
             
         else:
