@@ -24,11 +24,12 @@ from .state_trace import UsedStateTrace
 logger = logging.getLogger(__name__)
 
 class EVMSimulator:
-    def __init__(self, simulation_context: SimulationContext, rpc_url: str):
+    def __init__(self, simulation_context: SimulationContext, rpc_url: str, cache_dir: str):
         self.context = simulation_context
         self.rpc = EthereumRPC(rpc_url)
         self.env = Env(fast_mode_enabled=True, fork_try_prefetch_state=True)
         self.rpc_url = rpc_url
+        self.cache_dir = cache_dir
         self.vm = self.env.evm.vm
         self.state_tracer = PyEVMOpcodeStateTracer(self.env)
         self.header = self.vm.get_header()
@@ -37,8 +38,7 @@ class EVMSimulator:
     def fork_at_block(self, block_number: int):
         # Forking the EVM will re-initiliase the correct VM based on the block timestamp
         block_id = to_hex(block_number)
-        # self.env.fork_rpc(self.rpc, block_identifier=block_id, debug=False, cache_dir="./pybuilder_results_3/cache/")
-        self.env.fork_rpc(self.rpc, block_identifier=block_id)
+        self.env.fork_rpc(self.rpc, block_identifier=block_id, debug=False, cache_dir=self.cache_dir)
         self.vm = self.env.evm.vm
         self.header = self.vm.get_header()
         self._override_execution_context()  # Ensure execution context is set correctly

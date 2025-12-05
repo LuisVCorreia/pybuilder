@@ -2,6 +2,7 @@ fetch_rpc_url: "https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}"
 fetch_batch_size: 25
 fetch_mempool_data_dir: "~/.pybuilder/backtest/mempool_data"
 fetch_sqlite_db_path: "~/.pybuilder/backtest/main.sqlite"
+build_cache_path: "~/.pybuilder/backtest/cache"
 logging_level: "INFO"
 
 sbundle_mergeable_signers: []

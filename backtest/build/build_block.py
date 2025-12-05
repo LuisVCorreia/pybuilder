@@ -78,13 +78,17 @@ def run_backtest(args, config):
     # Expand environment variables in the URL
     rpc_url = os.path.expandvars(rpc_url)
 
+    cache_dir = config.get('build_cache_path')
+    if not cache_dir:
+        raise ValueError("build_cache_path not found in config")
+
     context = SimulationContext.from_onchain_block(
         order_source.block_data.onchain_block,
         order_source.block_data.winning_bid_trace
     )
 
     logger.info("Creating EVM simulator...")
-    evm_simulator = EVMSimulator(context, rpc_url)
+    evm_simulator = EVMSimulator(context, rpc_url, cache_dir)
 
     logger.info("Simulating orders...")
     simulated_orders = simulate_orders(order_objects, evm_simulator)
