@@ -1,6 +1,6 @@
-# pybuilder
+# pbuilder
 
-pybuilder is a Python-based backtesting framework for Ethereum block building, adapted from Flashbots' [rbuilder](https://github.com/flashbots/rbuilder). It removes the requirement for a local archive node and enables users to simulate the block building process using a standard RPC endpoint (e.g., [Alchemy](https://www.alchemy.com/)).
+pbuilder is a Python-based backtesting framework for Ethereum block building, adapted from Flashbots' [rbuilder](https://github.com/flashbots/rbuilder). It removes the requirement for a local archive node and enables users to simulate the block building process using a standard RPC endpoint (e.g., [Alchemy](https://www.alchemy.com/)).
 
 
 ## Setup
